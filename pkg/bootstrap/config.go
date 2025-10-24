@@ -23,6 +23,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	"google.golang.org/protobuf/types/known/wrapperspb"
@@ -128,7 +129,6 @@ func (cfg Config) toTemplateParams() (map[string]any, error) {
 		option.XdsType(xdsType),
 		option.MetadataDiscovery(mDiscovery),
 		option.MetricsLocalhostAccessOnly(cfg.Metadata.ProxyConfig.ProxyMetadata),
-		option.BypassOverloadManagerForStaticListeners(features.BypassOverloadManagerForStaticListeners),
 	)
 
 	// Add GCPProjectNumber to access in bootstrap template.
@@ -200,6 +200,10 @@ func (cfg Config) toTemplateParams() (map[string]any, error) {
 				option.Wildcard(option.WildcardIPv4),
 				option.DNSLookupFamily(option.DNSLookupFamilyIPv4))
 		}
+	}
+
+	if features.EnvoyStatusPortEnableProxyProtocol {
+		opts = append(opts, option.EnvoyStatusPortEnableProxyProtocol(true))
 	}
 
 	proxyOpts, err := getProxyConfigOptions(cfg.Metadata)
@@ -310,7 +314,7 @@ func getStatsOptions(meta *model.BootstrapNodeMetadata) []option.Instance {
 		compression = statsCompression
 	}
 
-	return []option.Instance{
+	options := []option.Instance{
 		option.EnvoyStatsMatcherInclusionPrefix(parseOption(prefixAnno,
 			requiredEnvoyStatsMatcherInclusionPrefixes, proxyConfigPrefixes)),
 		option.EnvoyStatsMatcherInclusionSuffix(parseOption(suffixAnno,
@@ -320,6 +324,30 @@ func getStatsOptions(meta *model.BootstrapNodeMetadata) []option.Instance {
 		option.EnvoyHistogramBuckets(buckets),
 		option.EnvoyStatsCompression(compression),
 	}
+
+	statsFlushInterval := 5 * time.Second // Default value is 5s.
+	if v, exits := meta.Annotations[annotation.SidecarStatsFlushInterval.Name]; exits {
+		d, err := time.ParseDuration(v)
+		if err == nil {
+			statsFlushInterval = d
+			options = append(options, option.EnvoyStatsFlushInterval(statsFlushInterval))
+		} else {
+			log.Warnf("Failed to parse stats flush interval %v: %v", v, err)
+		}
+	}
+
+	if eviction, exits := meta.Annotations[annotation.SidecarStatsEvictionInterval.Name]; exits {
+		statsEvictionInterval, err := time.ParseDuration(eviction)
+		if err != nil {
+			log.Warnf("Failed to parse stats eviction interval %v: %v", eviction, err)
+		} else if statsEvictionInterval%statsFlushInterval != 0 {
+			log.Warnf("StatsEvictionInterval must be a multiple of the StatsFlushInterval")
+		} else {
+			options = append(options, option.EnvoyStatsEvictionInterval(statsEvictionInterval))
+		}
+	}
+
+	return options
 }
 
 func lightstepAccessTokenFile(config string) string {
@@ -345,10 +373,10 @@ var StripFragment = env.Register("HTTP_STRIP_FRAGMENT_FROM_PATH_UNSAFE_IF_DISABL
 func extractRuntimeFlags(cfg *model.NodeMetaProxyConfig, policy string) map[string]any {
 	// Setup defaults
 	runtimeFlags := map[string]any{
-		"overload.global_downstream_max_connections": "2147483647",
-		"re2.max_program_size.error_level":           "32768",
+		"re2.max_program_size.error_level": "32768",
 		"envoy.deprecated_features:envoy.config.listener.v3.Listener.hidden_envoy_deprecated_use_original_dst": true,
 		"envoy.reloadable_features.http_reject_path_with_fragment":                                             false,
+		"envoy.reloadable_features.fixed_heap_use_allocated":                                                   true,
 	}
 	if policy == common_features.FIPS_140_2 {
 		// This flag limits google_grpc client in Envoy to TLSv1.2 as the maximum version.
@@ -545,7 +573,7 @@ func jsonStringToMap(jsonStr string) (m map[string]string) {
 	if err != nil {
 		log.Warnf("Env variable with value %q failed json unmarshal: %v", jsonStr, err)
 	}
-	return
+	return m
 }
 
 func extractAttributesMetadata(envVars []string, plat platform.Environment, meta *model.BootstrapNodeMetadata) {

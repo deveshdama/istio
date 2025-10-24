@@ -82,7 +82,7 @@ func (c *Controller) Reconcile(key types.NamespacedName) error {
 
 func (c *Controller) ReconcilePod(pod *corev1.Pod) (err error) {
 	if !c.matchesFilter(pod) {
-		return // Skip, pod doesn't need repair
+		return err // Skip, pod doesn't need repair
 	}
 	repairLog.Debugf("Reconciling pod %s", pod.Name)
 
@@ -104,6 +104,21 @@ func redirectRunningPod(pod *corev1.Pod, netns string) error {
 		return fmt.Errorf("setup redirect: %v", err)
 	}
 	rulesMgr := plugin.IptablesInterceptRuleMgr()
+	if err := rulesMgr.Program(pod.Name, netns, redirect); err != nil {
+		return fmt.Errorf("program redirection: %v", err)
+	}
+	return nil
+}
+
+// redirectRunningPodNFT dynamically enters the provided pod, that is already running,
+// and programs it's networking configuration using nftables rules.
+func redirectRunningPodNFT(pod *corev1.Pod, netns string) error {
+	pi := plugin.ExtractPodInfo(pod)
+	redirect, err := plugin.NewRedirect(pi)
+	if err != nil {
+		return fmt.Errorf("setup redirect: %v", err)
+	}
+	rulesMgr := plugin.NftablesInterceptRuleMgr()
 	if err := rulesMgr.Program(pod.Name, netns, redirect); err != nil {
 		return fmt.Errorf("program redirection: %v", err)
 	}

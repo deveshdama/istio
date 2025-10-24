@@ -49,6 +49,8 @@ elif [[ ${LOCAL_ARCH} == s390x ]]; then
     TARGET_ARCH=s390x
 elif [[ ${LOCAL_ARCH} == ppc64le ]]; then
     TARGET_ARCH=ppc64le
+elif [[ ${LOCAL_ARCH} == riscv64 ]]; then
+    TARGET_ARCH=riscv64
 else
     echo "This system's architecture, ${LOCAL_ARCH}, isn't supported"
     exit 1
@@ -75,7 +77,7 @@ fi
 TOOLS_REGISTRY_PROVIDER=${TOOLS_REGISTRY_PROVIDER:-gcr.io}
 PROJECT_ID=${PROJECT_ID:-istio-testing}
 if [[ "${IMAGE_VERSION:-}" == "" ]]; then
-  IMAGE_VERSION=master-ad62c06c1bc16a88743df338ec45a297ea9fcd91
+  IMAGE_VERSION=master-4d8a6668b6d46b3becc35f9b24467f841bbb020a
 fi
 if [[ "${IMAGE_NAME:-}" == "" ]]; then
   IMAGE_NAME=build-tools

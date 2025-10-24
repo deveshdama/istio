@@ -264,8 +264,8 @@ func GenerateDeployment(ctx resource.Context, cfg echo.Config, settings *resourc
 	return tmpl.Execute(deploy, params)
 }
 
-func GenerateService(cfg echo.Config) (string, error) {
-	params := serviceParams(cfg)
+func GenerateService(cfg echo.Config, isOpenShift bool) (string, error) {
+	params := serviceParams(cfg, isOpenShift)
 	return tmpl.Execute(getTemplate(serviceTemplateFile), params)
 }
 
@@ -295,13 +295,13 @@ var RevVMImages = func() map[string]echo.VMDistro {
 // istiod via the east-west gateway, even though they are installed on the same cluster as istiod.
 func getVMOverrideForIstiodDNS(ctx resource.Context, cfg echo.Config) (istioHost string, istioIP string) {
 	if ctx == nil {
-		return
+		return istioHost, istioIP
 	}
 
 	ist, err := istio.Get(ctx)
 	if err != nil {
 		log.Warnf("VM config failed to get Istio component for %s: %v", cfg.Cluster.Name(), err)
-		return
+		return istioHost, istioIP
 	}
 
 	// Generate the istiod host the same way as istioctl.
@@ -316,7 +316,7 @@ func getVMOverrideForIstiodDNS(ctx resource.Context, cfg echo.Config) (istioHost
 	} else {
 		istioIP = istioIPAddr.String()
 	}
-	return
+	return istioHost, istioIP
 }
 
 func deploymentParams(ctx resource.Context, cfg echo.Config, settings *resource.Settings) (map[string]any, error) {
@@ -356,6 +356,7 @@ func deploymentParams(ctx resource.Context, cfg echo.Config, settings *resource.
 			"ImageFullPath":  settings.CustomGRPCEchoImage, // This overrides image hub/tag if it's not empty.
 			"ContainerPorts": grpcPorts,
 			"FallbackPort":   grpcFallbackPort,
+			"DisableCAFlag":  "true", // the old cpp image doesn't support this new flag, so we elide it in templating
 		})
 	}
 
@@ -395,6 +396,7 @@ func deploymentParams(ctx resource.Context, cfg echo.Config, settings *resource.
 		"OverlayIstioProxy":       canCreateIstioProxy(settings.Revisions.Minimum()) && !settings.Ambient,
 		"Ambient":                 settings.Ambient,
 		"BindFamily":              cfg.BindFamily,
+		"OpenShift":               settings.OpenShift,
 	}
 
 	vmIstioHost, vmIstioIP := "", ""
@@ -422,7 +424,7 @@ func deploymentParams(ctx resource.Context, cfg echo.Config, settings *resource.
 	return params, nil
 }
 
-func serviceParams(cfg echo.Config) map[string]any {
+func serviceParams(cfg echo.Config, isOpenShift bool) map[string]any {
 	if cfg.ServiceWaypointProxy != "" {
 		if cfg.ServiceLabels == nil {
 			cfg.ServiceLabels = make(map[string]string)
@@ -438,6 +440,8 @@ func serviceParams(cfg echo.Config) map[string]any {
 		"IPFamilies":         cfg.IPFamilies,
 		"IPFamilyPolicy":     cfg.IPFamilyPolicy,
 		"ServiceAnnotations": cfg.ServiceAnnotations,
+		"Namespace":          cfg.Namespace.Name(),
+		"OpenShift":          isOpenShift,
 	}
 }
 
@@ -662,14 +666,15 @@ func getContainerPorts(cfg echo.Config) echoCommon.PortList {
 	for _, p := range ports {
 		// Add the port to the set of application ports.
 		cport := &echoCommon.Port{
-			Name:          p.Name,
-			Protocol:      p.Protocol,
-			Port:          p.WorkloadPort,
-			TLS:           p.TLS,
-			ServerFirst:   p.ServerFirst,
-			InstanceIP:    p.InstanceIP,
-			LocalhostIP:   p.LocalhostIP,
-			ProxyProtocol: p.ProxyProtocol,
+			Name:              p.Name,
+			Protocol:          p.Protocol,
+			Port:              p.WorkloadPort,
+			TLS:               p.TLS,
+			RequireClientCert: p.MTLS,
+			ServerFirst:       p.ServerFirst,
+			InstanceIP:        p.InstanceIP,
+			LocalhostIP:       p.LocalhostIP,
+			ProxyProtocol:     p.ProxyProtocol,
 		}
 		containerPorts = append(containerPorts, cport)
 

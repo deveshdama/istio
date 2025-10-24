@@ -19,8 +19,11 @@ import (
 	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listener "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	route "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	dfpcommon "github.com/envoyproxy/go-control-plane/envoy/extensions/common/dynamic_forward_proxy/v3"
 	sfsvalue "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/common/set_filter_state/v3"
 	cors "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/cors/v3"
+	dfp "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/dynamic_forward_proxy/v3"
+	extproc "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_proc/v3"
 	fault "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/fault/v3"
 	grpcstats "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/grpc_stats/v3"
 	grpcweb "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/grpc_web/v3"
@@ -37,12 +40,14 @@ import (
 	previoushost "github.com/envoyproxy/go-control-plane/envoy/extensions/retry/host/previous_hosts/v3"
 	resourcedetectors "github.com/envoyproxy/go-control-plane/envoy/extensions/tracers/opentelemetry/resource_detectors/v3"
 	rawbuffer "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/raw_buffer/v3"
+	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 
 	alpn "istio.io/api/envoy/config/filter/http/alpn/v2alpha1"
 	"istio.io/istio/pilot/pkg/features"
 	"istio.io/istio/pilot/pkg/networking/util"
 	"istio.io/istio/pilot/pkg/util/protoconv"
+	"istio.io/istio/pkg/config/constants"
 	"istio.io/istio/pkg/wellknown"
 )
 
@@ -155,6 +160,35 @@ var (
 		Name: util.StatefulSessionFilter,
 		ConfigType: &hcm.HttpFilter_TypedConfig{
 			TypedConfig: protoconv.MessageToAny(&statefulsession.StatefulSession{}),
+		},
+	}
+	InferencePoolExtProc = &hcm.HttpFilter{
+		Name: wellknown.HTTPExternalProcessing,
+		ConfigType: &hcm.HttpFilter_TypedConfig{
+			TypedConfig: protoconv.MessageToAny(&extproc.ExternalProcessor{
+				GrpcService: &core.GrpcService{
+					TargetSpecifier: &core.GrpcService_EnvoyGrpc_{
+						EnvoyGrpc: &core.GrpcService_EnvoyGrpc{
+							ClusterName: "dummy",
+						},
+					},
+					Timeout: &durationpb.Duration{Seconds: 10},
+				},
+				FailureModeAllow: true,
+				ProcessingMode: &extproc.ProcessingMode{
+					RequestHeaderMode:  extproc.ProcessingMode_SKIP,
+					ResponseHeaderMode: extproc.ProcessingMode_SKIP,
+				},
+				MessageTimeout: &durationpb.Duration{Seconds: 1000},
+				MetadataOptions: &extproc.MetadataOptions{
+					ReceivingNamespaces: &extproc.MetadataOptions_MetadataNamespaces{
+						Untyped: []string{constants.EnvoySubsetNamespace},
+					},
+					ForwardingNamespaces: &extproc.MetadataOptions_MetadataNamespaces{
+						Untyped: []string{constants.EnvoySubsetNamespace},
+					},
+				},
+			}),
 		},
 	}
 	Alpn = &hcm.HttpFilter{
@@ -495,5 +529,24 @@ var (
 func additionalLabels(cfg map[string]any) {
 	if additionalLabels := features.MetadataExchangeAdditionalLabels; len(additionalLabels) != 0 {
 		cfg["additional_labels"] = additionalLabels
+	}
+}
+
+// BuildWaypointInboundDFPFilter builds a dynamic forward proxy filter for waypoint inbound listeners
+// using the specified DNS cache config name. This name must match the name used in the corresponding
+// dynamic forward proxy cluster.
+func BuildWaypointInboundDFPFilter(dnsCacheConfigName string) *hcm.HttpFilter {
+	return &hcm.HttpFilter{
+		Name: "envoy.filters.http.dynamic_forward_proxy",
+		ConfigType: &hcm.HttpFilter_TypedConfig{
+			TypedConfig: protoconv.MessageToAny(&dfp.FilterConfig{
+				ImplementationSpecifier: &dfp.FilterConfig_DnsCacheConfig{
+					DnsCacheConfig: &dfpcommon.DnsCacheConfig{
+						Name:            dnsCacheConfigName,
+						DnsLookupFamily: cluster.Cluster_V4_ONLY,
+					},
+				},
+			}),
+		},
 	}
 }

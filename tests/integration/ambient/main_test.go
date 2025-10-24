@@ -19,6 +19,7 @@ package ambient
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
@@ -67,23 +68,31 @@ values:
     terminationGracePeriodSeconds: 5
     env:
       SECRET_TTL: 5m
+    podLabels:
+      networking.istio.io/tunnel: "http"
 `
 
+	nativeNftablesValues = `
+  global:
+    nativeNftables: true
+`
 	ambientMultiNetworkControlPlaneValues = `
 values:
   pilot:
     env:
       AMBIENT_ENABLE_MULTI_NETWORK: "true"
+  ztunnel:
+    terminationGracePeriodSeconds: 5
+    env:
+      SECRET_TTL: 5m
+    podLabels:
+      networking.istio.io/tunnel: "http"
   cni:
     # The CNI repair feature is disabled for these tests because this is a controlled environment,
     # and it is important to catch issues that might otherwise be automatically fixed.
     # Refer to issue #49207 for more context.
     repair:
       enabled: false
-  ztunnel:
-    terminationGracePeriodSeconds: 5
-    env:
-      SECRET_TTL: 5m
 `
 )
 
@@ -136,7 +145,15 @@ func TestMain(m *testing.M) {
 			cfg.EnableCNI = true
 			cfg.DeployEastWestGW = false
 			cfg.ControlPlaneValues = ambientControlPlaneValues
+
+			if ctx.Settings().NativeNftables {
+				scopes.Framework.Infof("Running the integration tests with nativeNftables enabled")
+				cfg.ControlPlaneValues = strings.TrimRight(ambientControlPlaneValues, "\n") + nativeNftablesValues
+			}
+
 			if ctx.Settings().AmbientMultiNetwork {
+				cfg.DeployEastWestGW = true
+				cfg.DeployGatewayAPI = true
 				cfg.ControlPlaneValues = ambientMultiNetworkControlPlaneValues
 				// TODO: Remove once we're actually ready to test the multi-cluster
 				// features
@@ -160,7 +177,7 @@ func TestMain(m *testing.M) {
 				if err != nil {
 					return err
 				}
-				return
+				return err
 			},
 		).
 		Run()
@@ -172,6 +189,9 @@ const (
 	Captured                  = "captured"
 	Uncaptured                = "uncaptured"
 	Sidecar                   = "sidecar"
+	Global                    = "global"
+	Local                     = "local"
+	EastWestGateway           = "eastwest-gateway"
 )
 
 var inMesh = match.Matcher(func(instance echo.Instance) bool {

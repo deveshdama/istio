@@ -64,7 +64,9 @@ var conformanceNamespaces = []string{
 	"gateway-conformance-web-backend",
 }
 
-var skippedTests = map[string]string{}
+var skippedTests = map[string]string{
+	"BackendTLSPolicyConflictResolution": "https://github.com/istio/istio/issues/57817",
+}
 
 func TestGatewayConformance(t *testing.T) {
 	framework.
@@ -139,6 +141,9 @@ func TestGatewayConformance(t *testing.T) {
 				opts.NamespaceLabels = map[string]string{
 					"istio-injection": "enabled",
 				}
+			}
+			if ctx.Settings().GatewayConformanceAllowCRDsMismatch {
+				opts.AllowCRDsMismatch = true
 			}
 			ctx.Cleanup(func() {
 				if !ctx.Failed() {

@@ -18,16 +18,16 @@ import (
 	k8sioapiappsv1 "k8s.io/api/apps/v1"
 	k8sioapiautoscalingv2 "k8s.io/api/autoscaling/v2"
 	k8sioapicertificatesv1 "k8s.io/api/certificates/v1"
-	k8sioapicertificatesv1alpha1 "k8s.io/api/certificates/v1alpha1"
+	k8sioapicertificatesv1beta1 "k8s.io/api/certificates/v1beta1"
 	k8sioapicoordinationv1 "k8s.io/api/coordination/v1"
 	k8sioapicorev1 "k8s.io/api/core/v1"
 	k8sioapidiscoveryv1 "k8s.io/api/discovery/v1"
 	k8sioapinetworkingv1 "k8s.io/api/networking/v1"
 	k8sioapipolicyv1 "k8s.io/api/policy/v1"
 	k8sioapiextensionsapiserverpkgapisapiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	sigsk8siogatewayapiinferenceextensionapiv1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 	sigsk8siogatewayapiapisv1 "sigs.k8s.io/gateway-api/apis/v1"
 	sigsk8siogatewayapiapisv1alpha2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
-	sigsk8siogatewayapiapisv1alpha3 "sigs.k8s.io/gateway-api/apis/v1alpha3"
 	sigsk8siogatewayapiapisv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 	sigsk8siogatewayapiapisxv1alpha1 "sigs.k8s.io/gateway-api/apisx/v1alpha1"
 
@@ -53,9 +53,9 @@ func create(c kube.Client, cfg config.Config, objMeta metav1.ObjectMeta) (metav1
 			Spec:       *(cfg.Spec.(*istioioapisecurityv1beta1.AuthorizationPolicy)),
 		}, metav1.CreateOptions{})
 	case gvk.BackendTLSPolicy:
-		return c.GatewayAPI().GatewayV1alpha3().BackendTLSPolicies(cfg.Namespace).Create(context.TODO(), &sigsk8siogatewayapiapisv1alpha3.BackendTLSPolicy{
+		return c.GatewayAPI().GatewayV1().BackendTLSPolicies(cfg.Namespace).Create(context.TODO(), &sigsk8siogatewayapiapisv1.BackendTLSPolicy{
 			ObjectMeta: objMeta,
-			Spec:       *(cfg.Spec.(*sigsk8siogatewayapiapisv1alpha3.BackendTLSPolicySpec)),
+			Spec:       *(cfg.Spec.(*sigsk8siogatewayapiapisv1.BackendTLSPolicySpec)),
 		}, metav1.CreateOptions{})
 	case gvk.DestinationRule:
 		return c.Istio().NetworkingV1().DestinationRules(cfg.Namespace).Create(context.TODO(), &apiistioioapinetworkingv1.DestinationRule{
@@ -86,6 +86,11 @@ func create(c kube.Client, cfg config.Config, objMeta metav1.ObjectMeta) (metav1
 		return c.GatewayAPI().GatewayV1beta1().HTTPRoutes(cfg.Namespace).Create(context.TODO(), &sigsk8siogatewayapiapisv1beta1.HTTPRoute{
 			ObjectMeta: objMeta,
 			Spec:       *(cfg.Spec.(*sigsk8siogatewayapiapisv1beta1.HTTPRouteSpec)),
+		}, metav1.CreateOptions{})
+	case gvk.InferencePool:
+		return c.GatewayAPIInference().InferenceV1().InferencePools(cfg.Namespace).Create(context.TODO(), &sigsk8siogatewayapiinferenceextensionapiv1.InferencePool{
+			ObjectMeta: objMeta,
+			Spec:       *(cfg.Spec.(*sigsk8siogatewayapiinferenceextensionapiv1.InferencePoolSpec)),
 		}, metav1.CreateOptions{})
 	case gvk.KubernetesGateway:
 		return c.GatewayAPI().GatewayV1beta1().Gateways(cfg.Namespace).Create(context.TODO(), &sigsk8siogatewayapiapisv1beta1.Gateway{
@@ -167,6 +172,11 @@ func create(c kube.Client, cfg config.Config, objMeta metav1.ObjectMeta) (metav1
 			ObjectMeta: objMeta,
 			Spec:       *(cfg.Spec.(*sigsk8siogatewayapiapisxv1alpha1.BackendTrafficPolicySpec)),
 		}, metav1.CreateOptions{})
+	case gvk.XListenerSet:
+		return c.GatewayAPI().ExperimentalV1alpha1().XListenerSets(cfg.Namespace).Create(context.TODO(), &sigsk8siogatewayapiapisxv1alpha1.XListenerSet{
+			ObjectMeta: objMeta,
+			Spec:       *(cfg.Spec.(*sigsk8siogatewayapiapisxv1alpha1.ListenerSetSpec)),
+		}, metav1.CreateOptions{})
 	default:
 		return nil, fmt.Errorf("unsupported type: %v", cfg.GroupVersionKind)
 	}
@@ -180,9 +190,9 @@ func update(c kube.Client, cfg config.Config, objMeta metav1.ObjectMeta) (metav1
 			Spec:       *(cfg.Spec.(*istioioapisecurityv1beta1.AuthorizationPolicy)),
 		}, metav1.UpdateOptions{})
 	case gvk.BackendTLSPolicy:
-		return c.GatewayAPI().GatewayV1alpha3().BackendTLSPolicies(cfg.Namespace).Update(context.TODO(), &sigsk8siogatewayapiapisv1alpha3.BackendTLSPolicy{
+		return c.GatewayAPI().GatewayV1().BackendTLSPolicies(cfg.Namespace).Update(context.TODO(), &sigsk8siogatewayapiapisv1.BackendTLSPolicy{
 			ObjectMeta: objMeta,
-			Spec:       *(cfg.Spec.(*sigsk8siogatewayapiapisv1alpha3.BackendTLSPolicySpec)),
+			Spec:       *(cfg.Spec.(*sigsk8siogatewayapiapisv1.BackendTLSPolicySpec)),
 		}, metav1.UpdateOptions{})
 	case gvk.DestinationRule:
 		return c.Istio().NetworkingV1().DestinationRules(cfg.Namespace).Update(context.TODO(), &apiistioioapinetworkingv1.DestinationRule{
@@ -213,6 +223,11 @@ func update(c kube.Client, cfg config.Config, objMeta metav1.ObjectMeta) (metav1
 		return c.GatewayAPI().GatewayV1beta1().HTTPRoutes(cfg.Namespace).Update(context.TODO(), &sigsk8siogatewayapiapisv1beta1.HTTPRoute{
 			ObjectMeta: objMeta,
 			Spec:       *(cfg.Spec.(*sigsk8siogatewayapiapisv1beta1.HTTPRouteSpec)),
+		}, metav1.UpdateOptions{})
+	case gvk.InferencePool:
+		return c.GatewayAPIInference().InferenceV1().InferencePools(cfg.Namespace).Update(context.TODO(), &sigsk8siogatewayapiinferenceextensionapiv1.InferencePool{
+			ObjectMeta: objMeta,
+			Spec:       *(cfg.Spec.(*sigsk8siogatewayapiinferenceextensionapiv1.InferencePoolSpec)),
 		}, metav1.UpdateOptions{})
 	case gvk.KubernetesGateway:
 		return c.GatewayAPI().GatewayV1beta1().Gateways(cfg.Namespace).Update(context.TODO(), &sigsk8siogatewayapiapisv1beta1.Gateway{
@@ -294,6 +309,11 @@ func update(c kube.Client, cfg config.Config, objMeta metav1.ObjectMeta) (metav1
 			ObjectMeta: objMeta,
 			Spec:       *(cfg.Spec.(*sigsk8siogatewayapiapisxv1alpha1.BackendTrafficPolicySpec)),
 		}, metav1.UpdateOptions{})
+	case gvk.XListenerSet:
+		return c.GatewayAPI().ExperimentalV1alpha1().XListenerSets(cfg.Namespace).Update(context.TODO(), &sigsk8siogatewayapiapisxv1alpha1.XListenerSet{
+			ObjectMeta: objMeta,
+			Spec:       *(cfg.Spec.(*sigsk8siogatewayapiapisxv1alpha1.ListenerSetSpec)),
+		}, metav1.UpdateOptions{})
 	default:
 		return nil, fmt.Errorf("unsupported type: %v", cfg.GroupVersionKind)
 	}
@@ -307,9 +327,9 @@ func updateStatus(c kube.Client, cfg config.Config, objMeta metav1.ObjectMeta) (
 			Status:     *(cfg.Status.(*istioioapimetav1alpha1.IstioStatus)),
 		}, metav1.UpdateOptions{})
 	case gvk.BackendTLSPolicy:
-		return c.GatewayAPI().GatewayV1alpha3().BackendTLSPolicies(cfg.Namespace).UpdateStatus(context.TODO(), &sigsk8siogatewayapiapisv1alpha3.BackendTLSPolicy{
+		return c.GatewayAPI().GatewayV1().BackendTLSPolicies(cfg.Namespace).UpdateStatus(context.TODO(), &sigsk8siogatewayapiapisv1.BackendTLSPolicy{
 			ObjectMeta: objMeta,
-			Status:     *(cfg.Status.(*sigsk8siogatewayapiapisv1alpha2.PolicyStatus)),
+			Status:     *(cfg.Status.(*sigsk8siogatewayapiapisv1.PolicyStatus)),
 		}, metav1.UpdateOptions{})
 	case gvk.DestinationRule:
 		return c.Istio().NetworkingV1().DestinationRules(cfg.Namespace).UpdateStatus(context.TODO(), &apiistioioapinetworkingv1.DestinationRule{
@@ -340,6 +360,11 @@ func updateStatus(c kube.Client, cfg config.Config, objMeta metav1.ObjectMeta) (
 		return c.GatewayAPI().GatewayV1beta1().HTTPRoutes(cfg.Namespace).UpdateStatus(context.TODO(), &sigsk8siogatewayapiapisv1beta1.HTTPRoute{
 			ObjectMeta: objMeta,
 			Status:     *(cfg.Status.(*sigsk8siogatewayapiapisv1beta1.HTTPRouteStatus)),
+		}, metav1.UpdateOptions{})
+	case gvk.InferencePool:
+		return c.GatewayAPIInference().InferenceV1().InferencePools(cfg.Namespace).UpdateStatus(context.TODO(), &sigsk8siogatewayapiinferenceextensionapiv1.InferencePool{
+			ObjectMeta: objMeta,
+			Status:     *(cfg.Status.(*sigsk8siogatewayapiinferenceextensionapiv1.InferencePoolStatus)),
 		}, metav1.UpdateOptions{})
 	case gvk.Ingress:
 		return c.Kube().NetworkingV1().Ingresses(cfg.Namespace).UpdateStatus(context.TODO(), &k8sioapinetworkingv1.Ingress{
@@ -421,6 +446,11 @@ func updateStatus(c kube.Client, cfg config.Config, objMeta metav1.ObjectMeta) (
 			ObjectMeta: objMeta,
 			Status:     *(cfg.Status.(*sigsk8siogatewayapiapisxv1alpha1.PolicyStatus)),
 		}, metav1.UpdateOptions{})
+	case gvk.XListenerSet:
+		return c.GatewayAPI().ExperimentalV1alpha1().XListenerSets(cfg.Namespace).UpdateStatus(context.TODO(), &sigsk8siogatewayapiapisxv1alpha1.XListenerSet{
+			ObjectMeta: objMeta,
+			Status:     *(cfg.Status.(*sigsk8siogatewayapiapisxv1alpha1.ListenerSetStatus)),
+		}, metav1.UpdateOptions{})
 	default:
 		return nil, fmt.Errorf("unsupported type: %v", cfg.GroupVersionKind)
 	}
@@ -447,19 +477,19 @@ func patch(c kube.Client, orig config.Config, origMeta metav1.ObjectMeta, mod co
 		return c.Istio().SecurityV1().AuthorizationPolicies(orig.Namespace).
 			Patch(context.TODO(), orig.Name, typ, patchBytes, metav1.PatchOptions{FieldManager: "pilot-discovery"})
 	case gvk.BackendTLSPolicy:
-		oldRes := &sigsk8siogatewayapiapisv1alpha3.BackendTLSPolicy{
+		oldRes := &sigsk8siogatewayapiapisv1.BackendTLSPolicy{
 			ObjectMeta: origMeta,
-			Spec:       *(orig.Spec.(*sigsk8siogatewayapiapisv1alpha3.BackendTLSPolicySpec)),
+			Spec:       *(orig.Spec.(*sigsk8siogatewayapiapisv1.BackendTLSPolicySpec)),
 		}
-		modRes := &sigsk8siogatewayapiapisv1alpha3.BackendTLSPolicy{
+		modRes := &sigsk8siogatewayapiapisv1.BackendTLSPolicy{
 			ObjectMeta: modMeta,
-			Spec:       *(mod.Spec.(*sigsk8siogatewayapiapisv1alpha3.BackendTLSPolicySpec)),
+			Spec:       *(mod.Spec.(*sigsk8siogatewayapiapisv1.BackendTLSPolicySpec)),
 		}
 		patchBytes, err := genPatchBytes(oldRes, modRes, typ)
 		if err != nil {
 			return nil, err
 		}
-		return c.GatewayAPI().GatewayV1alpha3().BackendTLSPolicies(orig.Namespace).
+		return c.GatewayAPI().GatewayV1().BackendTLSPolicies(orig.Namespace).
 			Patch(context.TODO(), orig.Name, typ, patchBytes, metav1.PatchOptions{FieldManager: "pilot-discovery"})
 	case gvk.DestinationRule:
 		oldRes := &apiistioioapinetworkingv1.DestinationRule{
@@ -550,6 +580,21 @@ func patch(c kube.Client, orig config.Config, origMeta metav1.ObjectMeta, mod co
 			return nil, err
 		}
 		return c.GatewayAPI().GatewayV1beta1().HTTPRoutes(orig.Namespace).
+			Patch(context.TODO(), orig.Name, typ, patchBytes, metav1.PatchOptions{FieldManager: "pilot-discovery"})
+	case gvk.InferencePool:
+		oldRes := &sigsk8siogatewayapiinferenceextensionapiv1.InferencePool{
+			ObjectMeta: origMeta,
+			Spec:       *(orig.Spec.(*sigsk8siogatewayapiinferenceextensionapiv1.InferencePoolSpec)),
+		}
+		modRes := &sigsk8siogatewayapiinferenceextensionapiv1.InferencePool{
+			ObjectMeta: modMeta,
+			Spec:       *(mod.Spec.(*sigsk8siogatewayapiinferenceextensionapiv1.InferencePoolSpec)),
+		}
+		patchBytes, err := genPatchBytes(oldRes, modRes, typ)
+		if err != nil {
+			return nil, err
+		}
+		return c.GatewayAPIInference().InferenceV1().InferencePools(orig.Namespace).
 			Patch(context.TODO(), orig.Name, typ, patchBytes, metav1.PatchOptions{FieldManager: "pilot-discovery"})
 	case gvk.KubernetesGateway:
 		oldRes := &sigsk8siogatewayapiapisv1beta1.Gateway{
@@ -791,6 +836,21 @@ func patch(c kube.Client, orig config.Config, origMeta metav1.ObjectMeta, mod co
 		}
 		return c.GatewayAPI().ExperimentalV1alpha1().XBackendTrafficPolicies(orig.Namespace).
 			Patch(context.TODO(), orig.Name, typ, patchBytes, metav1.PatchOptions{FieldManager: "pilot-discovery"})
+	case gvk.XListenerSet:
+		oldRes := &sigsk8siogatewayapiapisxv1alpha1.XListenerSet{
+			ObjectMeta: origMeta,
+			Spec:       *(orig.Spec.(*sigsk8siogatewayapiapisxv1alpha1.ListenerSetSpec)),
+		}
+		modRes := &sigsk8siogatewayapiapisxv1alpha1.XListenerSet{
+			ObjectMeta: modMeta,
+			Spec:       *(mod.Spec.(*sigsk8siogatewayapiapisxv1alpha1.ListenerSetSpec)),
+		}
+		patchBytes, err := genPatchBytes(oldRes, modRes, typ)
+		if err != nil {
+			return nil, err
+		}
+		return c.GatewayAPI().ExperimentalV1alpha1().XListenerSets(orig.Namespace).
+			Patch(context.TODO(), orig.Name, typ, patchBytes, metav1.PatchOptions{FieldManager: "pilot-discovery"})
 	default:
 		return nil, fmt.Errorf("unsupported type: %v", orig.GroupVersionKind)
 	}
@@ -805,7 +865,7 @@ func delete(c kube.Client, typ config.GroupVersionKind, name, namespace string, 
 	case gvk.AuthorizationPolicy:
 		return c.Istio().SecurityV1().AuthorizationPolicies(namespace).Delete(context.TODO(), name, deleteOptions)
 	case gvk.BackendTLSPolicy:
-		return c.GatewayAPI().GatewayV1alpha3().BackendTLSPolicies(namespace).Delete(context.TODO(), name, deleteOptions)
+		return c.GatewayAPI().GatewayV1().BackendTLSPolicies(namespace).Delete(context.TODO(), name, deleteOptions)
 	case gvk.DestinationRule:
 		return c.Istio().NetworkingV1().DestinationRules(namespace).Delete(context.TODO(), name, deleteOptions)
 	case gvk.EnvoyFilter:
@@ -818,6 +878,8 @@ func delete(c kube.Client, typ config.GroupVersionKind, name, namespace string, 
 		return c.GatewayAPI().GatewayV1beta1().GatewayClasses().Delete(context.TODO(), name, deleteOptions)
 	case gvk.HTTPRoute:
 		return c.GatewayAPI().GatewayV1beta1().HTTPRoutes(namespace).Delete(context.TODO(), name, deleteOptions)
+	case gvk.InferencePool:
+		return c.GatewayAPIInference().InferenceV1().InferencePools(namespace).Delete(context.TODO(), name, deleteOptions)
 	case gvk.KubernetesGateway:
 		return c.GatewayAPI().GatewayV1beta1().Gateways(namespace).Delete(context.TODO(), name, deleteOptions)
 	case gvk.PeerAuthentication:
@@ -850,6 +912,8 @@ func delete(c kube.Client, typ config.GroupVersionKind, name, namespace string, 
 		return c.Istio().NetworkingV1().WorkloadGroups(namespace).Delete(context.TODO(), name, deleteOptions)
 	case gvk.XBackendTrafficPolicy:
 		return c.GatewayAPI().ExperimentalV1alpha1().XBackendTrafficPolicies(namespace).Delete(context.TODO(), name, deleteOptions)
+	case gvk.XListenerSet:
+		return c.GatewayAPI().ExperimentalV1alpha1().XListenerSets(namespace).Delete(context.TODO(), name, deleteOptions)
 	default:
 		return fmt.Errorf("unsupported type: %v", typ)
 	}
@@ -876,7 +940,7 @@ var translationMap = map[config.GroupVersionKind]func(r runtime.Object) config.C
 		}
 	},
 	gvk.BackendTLSPolicy: func(r runtime.Object) config.Config {
-		obj := r.(*sigsk8siogatewayapiapisv1alpha3.BackendTLSPolicy)
+		obj := r.(*sigsk8siogatewayapiapisv1.BackendTLSPolicy)
 		return config.Config{
 			Meta: config.Meta{
 				GroupVersionKind:  gvk.BackendTLSPolicy,
@@ -914,7 +978,7 @@ var translationMap = map[config.GroupVersionKind]func(r runtime.Object) config.C
 		}
 	},
 	gvk.ClusterTrustBundle: func(r runtime.Object) config.Config {
-		obj := r.(*k8sioapicertificatesv1alpha1.ClusterTrustBundle)
+		obj := r.(*k8sioapicertificatesv1beta1.ClusterTrustBundle)
 		return config.Config{
 			Meta: config.Meta{
 				GroupVersionKind:  gvk.ClusterTrustBundle,
@@ -1158,6 +1222,25 @@ var translationMap = map[config.GroupVersionKind]func(r runtime.Object) config.C
 		return config.Config{
 			Meta: config.Meta{
 				GroupVersionKind:  gvk.HorizontalPodAutoscaler,
+				Name:              obj.Name,
+				Namespace:         obj.Namespace,
+				Labels:            obj.Labels,
+				Annotations:       obj.Annotations,
+				ResourceVersion:   obj.ResourceVersion,
+				CreationTimestamp: obj.CreationTimestamp.Time,
+				OwnerReferences:   obj.OwnerReferences,
+				UID:               string(obj.UID),
+				Generation:        obj.Generation,
+			},
+			Spec:   &obj.Spec,
+			Status: &obj.Status,
+		}
+	},
+	gvk.InferencePool: func(r runtime.Object) config.Config {
+		obj := r.(*sigsk8siogatewayapiinferenceextensionapiv1.InferencePool)
+		return config.Config{
+			Meta: config.Meta{
+				GroupVersionKind:  gvk.InferencePool,
 				Name:              obj.Name,
 				Namespace:         obj.Namespace,
 				Labels:            obj.Labels,
@@ -1698,6 +1781,25 @@ var translationMap = map[config.GroupVersionKind]func(r runtime.Object) config.C
 		return config.Config{
 			Meta: config.Meta{
 				GroupVersionKind:  gvk.XBackendTrafficPolicy,
+				Name:              obj.Name,
+				Namespace:         obj.Namespace,
+				Labels:            obj.Labels,
+				Annotations:       obj.Annotations,
+				ResourceVersion:   obj.ResourceVersion,
+				CreationTimestamp: obj.CreationTimestamp.Time,
+				OwnerReferences:   obj.OwnerReferences,
+				UID:               string(obj.UID),
+				Generation:        obj.Generation,
+			},
+			Spec:   &obj.Spec,
+			Status: &obj.Status,
+		}
+	},
+	gvk.XListenerSet: func(r runtime.Object) config.Config {
+		obj := r.(*sigsk8siogatewayapiapisxv1alpha1.XListenerSet)
+		return config.Config{
+			Meta: config.Meta{
+				GroupVersionKind:  gvk.XListenerSet,
 				Name:              obj.Name,
 				Namespace:         obj.Namespace,
 				Labels:            obj.Labels,

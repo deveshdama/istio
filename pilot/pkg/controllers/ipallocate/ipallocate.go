@@ -27,6 +27,7 @@ import (
 
 	apiv1alpha3 "istio.io/api/networking/v1alpha3"
 	networkingv1 "istio.io/client-go/pkg/apis/networking/v1"
+	"istio.io/istio/pilot/pkg/features"
 	autoallocate "istio.io/istio/pilot/pkg/networking/serviceentry"
 	"istio.io/istio/pkg/config"
 	cfghost "istio.io/istio/pkg/config/host"
@@ -49,7 +50,7 @@ type IPAllocator struct {
 	stopChan           <-chan struct{}
 	queue              controllers.Queue
 
-	// This controller is not safe for concurency but it exists outside the critical path performing important but minimal functionality in a single thread.
+	// This controller is not safe for concurrency but it exists outside the critical path performing important but minimal functionality in a single thread.
 	// If we want the multi-thread this controller we must add locking around accessing the allocators which would otherwise be racy
 	v4allocator *prefixUse
 	v6allocator *prefixUse
@@ -95,9 +96,6 @@ func newConflictDetectedEvent(id types.NamespacedName, addresses []netip.Addr) c
 
 const (
 	controllerName = "IP Autoallocator"
-	// these are the ranges of the v1 logic, do we need to choose new ranges?
-	IPV4Prefix = "240.240.0.0/16"
-	IPV6Prefix = "2001:2::/48"
 )
 
 func NewIPAllocator(stop <-chan struct{}, c kubelib.Client) *IPAllocator {
@@ -122,8 +120,8 @@ func NewIPAllocator(stop <-chan struct{}, c kubelib.Client) *IPAllocator {
 		index:              index,
 		stopChan:           stop,
 		// MustParsePrefix is OK because these are const. If we allow user configuration we must not use this function.
-		v4allocator: newPrefixUse(netip.MustParsePrefix(IPV4Prefix)),
-		v6allocator: newPrefixUse(netip.MustParsePrefix(IPV6Prefix)),
+		v4allocator: newPrefixUse(netip.MustParsePrefix(features.IPAutoallocateIPv4Prefix)),
+		v6allocator: newPrefixUse(netip.MustParsePrefix(features.IPAutoallocateIPv6Prefix)),
 	}
 	allocator.queue = controllers.NewQueue(controllerName, controllers.WithGenericReconciler(allocator.reconcile), controllers.WithMaxAttempts(5))
 	client.AddEventHandler(controllers.ObjectHandler(allocator.queue.AddObject))
@@ -333,9 +331,9 @@ type jsonPatch struct {
 	Value     interface{} `json:"value"`
 }
 
-// filter out any wildcarded hosts
-func removeWildCarded(h string) bool {
-	return !cfghost.Name(h).IsWildCarded()
+func keepHost(se *networkingv1.ServiceEntry, h string) bool {
+	// Only keep wildcarded hosts if the resolution is dynamic DNS
+	return !cfghost.Name(h).IsWildCarded() || se.Spec.Resolution == apiv1alpha3.ServiceEntry_DYNAMIC_DNS
 }
 
 func (c *IPAllocator) statusPatchForAddresses(se *networkingv1.ServiceEntry, forcedReassign bool) ([]byte, []byte, error) {
@@ -347,7 +345,7 @@ func (c *IPAllocator) statusPatchForAddresses(se *networkingv1.ServiceEntry, for
 	hostsWithAddresses := sets.New[string]()
 	hostsInSpec := sets.New[string]()
 
-	for _, host := range slices.Filter(se.Spec.Hosts, removeWildCarded) {
+	for _, host := range slices.Filter(se.Spec.Hosts, func(h string) bool { return keepHost(se, h) }) {
 		hostsInSpec.Insert(host)
 	}
 	existingAddresses := []netip.Addr{}
@@ -374,7 +372,7 @@ func (c *IPAllocator) statusPatchForAddresses(se *networkingv1.ServiceEntry, for
 
 	// construct the assigned addresses datastructure to patch
 	assignedAddresses := []apiv1alpha3.ServiceEntryAddress{}
-	for _, host := range slices.Filter(se.Spec.Hosts, removeWildCarded) {
+	for _, host := range slices.Filter(se.Spec.Hosts, func(h string) bool { return keepHost(se, h) }) {
 		if assignedHosts.InsertContains(host) {
 			continue
 		}
@@ -392,6 +390,13 @@ func (c *IPAllocator) statusPatchForAddresses(se *networkingv1.ServiceEntry, for
 	}
 
 	replaceAddresses, err := json.Marshal([]jsonPatch{
+		// Ensure the existing status we are acting on has not changed since we decided to allocate.
+		// This avoids TOCTOU race conditions
+		{
+			Operation: "test",
+			Path:      "/status/addresses",
+			Value:     se.Status.Addresses,
+		},
 		{
 			Operation: "replace",
 			Path:      "/status/addresses",
@@ -486,9 +491,9 @@ func (i prefixUse) isUsedBy(n netip.Addr, owner types.NamespacedName) (used, use
 		used = true // it is in use
 		res := strings.Compare(foundOwner.String(), owner.String())
 		usedByOwner = res == 0 // is it in use by the providec owner?
-		return
+		return used, usedByOwner
 	}
-	return
+	return used, usedByOwner
 }
 
 // markUsed will store the provided addr as used in this ipAllocator
@@ -496,11 +501,11 @@ func (i prefixUse) isUsedBy(n netip.Addr, owner types.NamespacedName) (used, use
 func (i prefixUse) markUsed(n netip.Addr, owner types.NamespacedName) (used, usedByOwner bool) {
 	if !i.prefix.Contains(n) {
 		// not in our range, no need to track it
-		return
+		return used, usedByOwner
 	}
 	used, usedByOwner = i.isUsedBy(n, owner)
 	if used {
-		return
+		return used, usedByOwner
 	}
 	i.used[n] = owner
 

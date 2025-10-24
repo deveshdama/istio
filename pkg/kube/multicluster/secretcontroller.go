@@ -236,7 +236,9 @@ func DefaultBuildClientsFromConfig(kubeConfig []byte, clusterID cluster.ID, conf
 	if err != nil {
 		return nil, fmt.Errorf("failed to create kube clients: %v", err)
 	}
-	if features.WorkloadEntryCrossCluster {
+
+	// We need to read remote gateways in ambient multicluster mode
+	if features.WorkloadEntryCrossCluster || features.EnableAmbientMultiNetwork {
 		clients = kube.EnableCrdWatcher(clients)
 	}
 
@@ -288,6 +290,8 @@ func (c *Controller) addSecret(name types.NamespacedName, s *corev1.Secret) erro
 			}
 			// stop previous remote cluster
 			prev.Stop()
+			// TODO(keithmattix): Is it safe to shutdown the kubeclient here as well? If we don't
+			// the goroutine will continue to run and the client will leak.
 		} else if c.cs.Contains(cluster.ID(clusterID)) {
 			// if the cluster has been registered before by another secret, ignore the new one.
 			logger.Warnf("cluster has already been registered")
@@ -330,6 +334,7 @@ func (c *Controller) deleteCluster(secretKey string, cluster *Cluster) {
 	cluster.Stop()
 	c.handleDelete(cluster.ID)
 	c.cs.Delete(secretKey, cluster.ID)
+	cluster.Client.Shutdown() // Shutdown all of the informers so that the goroutines won't leak
 
 	log.Infof("Number of remote clusters: %d", c.cs.Len())
 }

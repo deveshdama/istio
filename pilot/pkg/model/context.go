@@ -29,6 +29,7 @@ import (
 	discovery "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
 	anypb "google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/structpb"
+	"k8s.io/apimachinery/pkg/types"
 
 	meshconfig "istio.io/api/mesh/v1alpha1"
 	"istio.io/istio/pilot/pkg/credentials"
@@ -38,6 +39,7 @@ import (
 	networkutil "istio.io/istio/pilot/pkg/util/network"
 	v3 "istio.io/istio/pilot/pkg/xds/v3"
 	"istio.io/istio/pkg/cluster"
+	"istio.io/istio/pkg/config"
 	"istio.io/istio/pkg/config/constants"
 	"istio.io/istio/pkg/config/host"
 	"istio.io/istio/pkg/config/mesh"
@@ -223,7 +225,7 @@ func (e *Environment) Init() {
 
 func (e *Environment) InitNetworksManager(updater XDSUpdater) (err error) {
 	e.NetworkManager, err = NewNetworkManager(e, updater)
-	return
+	return err
 }
 
 func (e *Environment) ClusterLocal() ClusterLocalProvider {
@@ -558,7 +560,7 @@ func (node *Proxy) SetGatewaysForProxy(ps *PushContext) {
 func (node *Proxy) ShouldUpdateServiceTargets(updates sets.Set[ConfigKey]) bool {
 	// we only care for services which can actually select this proxy
 	for config := range updates {
-		if config.Kind == kind.ServiceEntry || config.Namespace == node.Metadata.Namespace {
+		if config.Kind == kind.ServiceEntry && config.Namespace == node.Metadata.Namespace {
 			return true
 		}
 	}
@@ -641,7 +643,7 @@ func (node *Proxy) GetIPMode() IPMode {
 }
 
 // SetIPMode set node's ip mode
-// Note: Donot use this function directly in most cases, use DiscoverIPMode instead.
+// Note: Do not use this function directly in most cases, use DiscoverIPMode instead.
 func (node *Proxy) SetIPMode(mode IPMode) {
 	node.ipMode = mode
 }
@@ -1061,15 +1063,21 @@ func (node *Proxy) DeleteWatchedResource(typeURL string) {
 	delete(node.WatchedResources, typeURL)
 }
 
+type InferenceGatewayContext interface {
+	// HasInferencePool returns whether or not a given gateway has a reference to an InferencePool
+	HasInferencePool(types.NamespacedName) bool
+}
+
 type GatewayController interface {
 	ConfigStoreController
+	InferenceGatewayContext
 	// Reconcile updates the internal state of the gateway controller for a given input. This should be
 	// called before any List/Get calls if the state has changed
 	Reconcile(ctx *PushContext)
 	// SecretAllowed determines if a SDS credential is accessible to a given namespace.
 	// For example, for resourceName of `kubernetes-gateway://ns-name/secret-name` and namespace of `ingress-ns`,
 	// this would return true only if there was a policy allowing `ingress-ns` to access Secrets in the `ns-name` namespace.
-	SecretAllowed(resourceName string, namespace string) bool
+	SecretAllowed(ourKind config.GroupVersionKind, resourceName string, namespace string) bool
 }
 
 // OutboundListenerClass is a helper to turn a NodeType for outbound to a ListenerClass.

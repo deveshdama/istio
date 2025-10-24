@@ -24,10 +24,12 @@ import (
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 
+	cniconfig "istio.io/istio/cni/pkg/config"
 	"istio.io/istio/pkg/ptr"
+	"istio.io/istio/tools/common/config"
 )
 
-func AddInpodMarkIPRule(cfg *IptablesConfig) error {
+func AddInpodMarkIPRule(cfg *cniconfig.AmbientConfig) error {
 	err := forEachInpodMarkIPRule(cfg, netlink.RuleAdd)
 	if errors.Is(err, unix.EEXIST) {
 		log.Debugf("Ignoring exists error adding inpod mark ip rule: %v", err)
@@ -36,11 +38,11 @@ func AddInpodMarkIPRule(cfg *IptablesConfig) error {
 	return err
 }
 
-func DelInpodMarkIPRule(cfg *IptablesConfig) error {
+func DelInpodMarkIPRule(cfg *cniconfig.AmbientConfig) error {
 	return forEachInpodMarkIPRule(cfg, netlink.RuleDel)
 }
 
-func forEachInpodMarkIPRule(cfg *IptablesConfig, f func(*netlink.Rule) error) error {
+func forEachInpodMarkIPRule(cfg *cniconfig.AmbientConfig, f func(*netlink.Rule) error) error {
 	var rules []*netlink.Rule
 	families := []int{unix.AF_INET}
 	if cfg.EnableIPv6 {
@@ -56,9 +58,9 @@ func forEachInpodMarkIPRule(cfg *IptablesConfig, f func(*netlink.Rule) error) er
 		// TODO largely identical/copied from tools/istio-iptables/pkg/capture/run_linux.go
 		inpodMarkRule := netlink.NewRule()
 		inpodMarkRule.Family = family
-		inpodMarkRule.Table = RouteTableInbound
-		inpodMarkRule.Mark = InpodTProxyMark
-		inpodMarkRule.Mask = ptr.Of(uint32(InpodTProxyMask))
+		inpodMarkRule.Table = cniconfig.RouteTableInbound
+		inpodMarkRule.Mark = cniconfig.InpodTProxyMark
+		inpodMarkRule.Mask = ptr.Of(uint32(cniconfig.InpodTProxyMask))
 		inpodMarkRule.Priority = 32764
 		rules = append(rules, inpodMarkRule)
 	}
@@ -73,11 +75,11 @@ func forEachInpodMarkIPRule(cfg *IptablesConfig, f func(*netlink.Rule) error) er
 	return nil
 }
 
-func AddLoopbackRoutes(cfg *IptablesConfig) error {
+func AddLoopbackRoutes(cfg *cniconfig.AmbientConfig) error {
 	return forEachLoopbackRoute(cfg, "add", netlink.RouteReplace)
 }
 
-func DelLoopbackRoutes(cfg *IptablesConfig) error {
+func DelLoopbackRoutes(cfg *cniconfig.AmbientConfig) error {
 	return forEachLoopbackRoute(cfg, "remove", netlink.RouteDel)
 }
 
@@ -91,8 +93,8 @@ func ReadSysctl(key string) (string, error) {
 	return strings.TrimSpace(string(data)), nil
 }
 
-func forEachLoopbackRoute(cfg *IptablesConfig, operation string, f func(*netlink.Route) error) error {
-	loopbackLink, err := netlink.LinkByName("lo")
+func forEachLoopbackRoute(cfg *cniconfig.AmbientConfig, operation string, f func(*netlink.Route) error) error {
+	loopbackLink, err := config.LinkByNameWithRetries("lo")
 	if err != nil {
 		return fmt.Errorf("failed to find 'lo' link: %v", err)
 	}
@@ -105,7 +107,7 @@ func forEachLoopbackRoute(cfg *IptablesConfig, operation string, f func(*netlink
 		if v != "1" {
 			// If we got an error, we will proceed. Maybe it will work anyways
 			if err != nil {
-				log.Warnf("attempted to read %q got error: %v; attemping to continue", ipv6DisabledLo, err)
+				log.Warnf("attempted to read %q got error: %v; attempting to continue", ipv6DisabledLo, err)
 			}
 			cidrs = append(cidrs, "0::0/0")
 		} else {
@@ -126,7 +128,7 @@ func forEachLoopbackRoute(cfg *IptablesConfig, operation string, f func(*netlink
 				Dst:       localhostDst,
 				Scope:     netlink.SCOPE_HOST,
 				Type:      unix.RTN_LOCAL,
-				Table:     RouteTableInbound,
+				Table:     cniconfig.RouteTableInbound,
 				LinkIndex: loopbackLink.Attrs().Index,
 			},
 		}

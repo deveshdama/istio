@@ -21,6 +21,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	discovery "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	"sigs.k8s.io/gateway-api/apis/v1beta1"
 
 	"istio.io/api/annotation"
@@ -306,6 +307,60 @@ func TestPodWorkloads(t *testing.T) {
 							ServicePort: 81,
 							TargetPort:  9090,
 						}},
+					},
+				},
+			},
+		},
+		{
+			name: "pod selected by ServiceEntry honors port name mapping",
+			inputs: []any{
+				model.ServiceInfo{
+					Service: &workloadapi.Service{
+						Name:      "httpbin",
+						Namespace: "httpbin2",
+						Hostname:  "httpbin.httpbin2.mesh.internal",
+						Ports: []*workloadapi.Port{{
+							ServicePort: 8002,
+							TargetPort:  0,
+						}},
+					},
+					PortNames: map[int32]model.ServicePortName{
+						8002: {PortName: "http"},
+					},
+					LabelSelector: model.NewSelector(map[string]string{"app": "httpbin"}),
+					Source:        model.TypedObject{Kind: kind.ServiceEntry},
+				},
+			},
+			pod: &v1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "httpbin-123",
+					Namespace: "httpbin2",
+					Labels:    map[string]string{"app": "httpbin"},
+				},
+				Spec: v1.PodSpec{
+					Containers: []v1.Container{{Ports: []v1.ContainerPort{{
+						Name:          "http",
+						ContainerPort: 8000,
+						Protocol:      v1.ProtocolTCP,
+					}}}},
+				},
+				Status: v1.PodStatus{Phase: v1.PodRunning, Conditions: podReady, PodIP: "10.1.1.1"},
+			},
+			result: &workloadapi.Workload{
+				Uid:               "cluster0//Pod/httpbin2/httpbin-123",
+				Name:              "httpbin-123",
+				Namespace:         "httpbin2",
+				Addresses:         [][]byte{netip.MustParseAddr("10.1.1.1").AsSlice()},
+				Network:           testNW,
+				CanonicalName:     "httpbin",
+				CanonicalRevision: "latest",
+				WorkloadType:      workloadapi.WorkloadType_POD,
+				WorkloadName:      "httpbin-123",
+				Status:            workloadapi.WorkloadStatus_HEALTHY,
+				ClusterId:         testC,
+				Services: map[string]*workloadapi.PortList{
+					"httpbin2/httpbin.httpbin2.mesh.internal": {
+						Ports: []*workloadapi.Port{{ServicePort: 8002, TargetPort: 8000}},
 					},
 				},
 			},
@@ -965,7 +1020,7 @@ func TestWorkloadEntryWorkloads(t *testing.T) {
 							},
 							{
 								ServicePort: 81,
-								TargetPort:  0,
+								TargetPort:  8081,
 							},
 							{
 								ServicePort: 82,
@@ -981,7 +1036,7 @@ func TestWorkloadEntryWorkloads(t *testing.T) {
 						// Not a named port
 						80: {PortName: "80"},
 						// Named port found in WE
-						81: {PortName: "81", TargetPortName: "81-target"},
+						81: {PortName: "81"},
 						// Named port target found in WE
 						82: {PortName: "82", TargetPortName: "82-target"},
 						// Named port not found in WE
@@ -1026,6 +1081,10 @@ func TestWorkloadEntryWorkloads(t *testing.T) {
 							{
 								ServicePort: 80,
 								TargetPort:  8080,
+							},
+							{
+								ServicePort: 81,
+								TargetPort:  8180,
 							},
 							{
 								ServicePort: 82,
@@ -1702,7 +1761,7 @@ func kubernetesAPIServerEndpoint(ip string) *discovery.EndpointSlice {
 func newAmbientUnitTest(t test.Failer) *index {
 	// Set up a basic network environment so tests have a default network and some gateways
 	// Note: unlike other collections, networks are stored in the ambientIndex struct since they
-	// are passed in almost everywhere. So we need to constuct it here.
+	// are passed in almost everywhere. So we need to construct it here.
 	mock := krttest.NewMock(t, []any{
 		&v1.Namespace{
 			ObjectMeta: metav1.ObjectMeta{
@@ -1723,17 +1782,19 @@ func newAmbientUnitTest(t test.Failer) *index {
 			},
 			Spec: v1beta1.GatewaySpec{
 				GatewayClassName: "istio-remote",
-				Addresses: []v1beta1.GatewaySpecAddress{
-					{
-						Type:  ptr.Of(v1beta1.IPAddressType),
-						Value: "9.9.9.9",
-					},
-				},
 				Listeners: []v1beta1.Listener{
 					{
 						Name:     "cross-network",
 						Port:     15008,
 						Protocol: "HBONE",
+					},
+				},
+			},
+			Status: v1beta1.GatewayStatus{
+				Addresses: []gatewayv1.GatewayStatusAddress{
+					{
+						Type:  ptr.Of(gatewayv1.IPAddressType),
+						Value: "9.9.9.9",
 					},
 				},
 			},
@@ -1751,17 +1812,19 @@ func newAmbientUnitTest(t test.Failer) *index {
 			},
 			Spec: v1beta1.GatewaySpec{
 				GatewayClassName: "istio-remote",
-				Addresses: []v1beta1.GatewaySpecAddress{
-					{
-						Type:  ptr.Of(v1beta1.HostnameAddressType),
-						Value: "networkgateway.example.com",
-					},
-				},
 				Listeners: []v1beta1.Listener{
 					{
 						Name:     "cross-network",
 						Port:     15008,
 						Protocol: "HBONE",
+					},
+				},
+			},
+			Status: v1beta1.GatewayStatus{
+				Addresses: []gatewayv1.GatewayStatusAddress{
+					{
+						Type:  ptr.Of(gatewayv1.HostnameAddressType),
+						Value: "networkgateway.example.com",
 					},
 				},
 			},

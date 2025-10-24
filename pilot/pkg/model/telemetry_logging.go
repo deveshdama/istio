@@ -138,7 +138,7 @@ var (
 // configureFromProviderConfigHandled contains the number of providers we handle below.
 // This is to ensure this stays in sync as new handlers are added
 // STOP. DO NOT UPDATE THIS WITHOUT UPDATING telemetryAccessLog.
-const telemetryAccessLogHandled = 14
+const telemetryAccessLogHandled = 15
 
 func telemetryAccessLog(push *PushContext, proxy *Proxy, fp *meshconfig.MeshConfig_ExtensionProvider) *accesslog.AccessLog {
 	// Skip built-in formatter if Istio version is >= 1.26
@@ -171,6 +171,7 @@ func telemetryAccessLog(push *PushContext, proxy *Proxy, fp *meshconfig.MeshConf
 		*meshconfig.MeshConfig_ExtensionProvider_Opencensus,
 		*meshconfig.MeshConfig_ExtensionProvider_Opentelemetry,
 		*meshconfig.MeshConfig_ExtensionProvider_Prometheus,
+		*meshconfig.MeshConfig_ExtensionProvider_Sds,
 		*meshconfig.MeshConfig_ExtensionProvider_Stackdriver:
 		// No access logs supported for this provider
 		// Stackdriver is a special case as its handled in the Metrics logic, as it uses a shared filter
@@ -590,7 +591,7 @@ func ConvertStructToAttributeKeyValues(labels map[string]*structpb.Value) []*otl
 func LookupCluster(push *PushContext, service string, port int) (hostname string, cluster string, err error) {
 	if service == "" {
 		err = fmt.Errorf("service must not be empty")
-		return
+		return hostname, cluster, err
 	}
 
 	// TODO(yangminzhu): Verify the service and its cluster is supported, e.g. resolution type is not OriginalDst.
@@ -599,7 +600,7 @@ func LookupCluster(push *PushContext, service string, port int) (hostname string
 		if svc := push.ServiceIndex.HostnameAndNamespace[host.Name(name)][namespace]; svc != nil {
 			hostname = string(svc.Hostname)
 			cluster = BuildSubsetKey(TrafficDirectionOutbound, "", svc.Hostname, port)
-			return
+			return hostname, cluster, err
 		}
 	} else {
 		namespaceToServices := push.ServiceIndex.HostnameAndNamespace[host.Name(service)]
@@ -612,14 +613,14 @@ func LookupCluster(push *PushContext, service string, port int) (hostname string
 			svc := namespaceToServices[namespaces[0]]
 			hostname = string(svc.Hostname)
 			cluster = BuildSubsetKey(TrafficDirectionOutbound, "", svc.Hostname, port)
-			return
+			return hostname, cluster, err
 		} else if len(namespaces) > 1 {
 			err = fmt.Errorf("found %s in multiple namespaces %v, specify the namespace explicitly in "+
 				"the format of <Namespace>/<Hostname>", service, namespaces)
-			return
+			return hostname, cluster, err
 		}
 	}
 
 	err = fmt.Errorf("could not find service %s in Istio service registry", service)
-	return
+	return hostname, cluster, err
 }

@@ -200,8 +200,6 @@ func GetValuesOverrides(ctx framework.TestContext, hub, tag, variant, revision s
 	// Handle Ambient profile override if set
 	if isAmbient {
 		values["profile"] = "ambient"
-		// Remove revision for ambient profile
-		delete(values, "revision")
 	}
 
 	// Marshal the map to a YAML string
@@ -296,7 +294,37 @@ func InstallIstio(t framework.TestContext, cs cluster.Cluster, h *helm.Helm, ove
 	}
 
 	if installGateway {
-		err = h.InstallChart(IngressReleaseName, gatewayChartPath, nsConfig.Get(IngressReleaseName), gatewayOverrideValuesFile, Timeout, versionArgs)
+		// Why we skip schema validation when installing old gateway charts
+		//
+		// Context:
+		// - With newer Helm versions, validation against values.schema.json is stricter. Older
+		//   gateway chart schemas (the “previous minor” we install from the Helm repo here) have
+		//   additionalProperties=false at the root and do not list newer top-level keys we include
+		//   in our test overrides (e.g., global, revision, profile, _internal_defaults_do_not_set,
+		//   platform). Newer Helm enforces this more strictly, causing the install to fail before
+		//   rendering.
+		// - This is not just a “test-only” mismatch; new Helm + old charts can fail validation in
+		//   some user scenarios as well. Backports are being prepared/applied to the older charts
+		//   to address this at the source.
+		//
+		// Why this is safe (and temporary):
+		// - In this test we only skip schema validation for the legacy gateway install (when
+		//   version != "") to unblock the upgrade flow. We continue to fully validate installs
+		//   and upgrades of the charts under test (master).
+		// - This does not weaken the validation of current charts, and it avoids upgrade test
+		//   failures rooted in old chart schemas plus stricter Helm behavior.
+		// - Once the backported schema fixes are published in the Helm repo for the previous
+		//   minor, we can remove this flag.
+		//
+		// TODO(istio/istio#57507): remove --skip-schema-validation once the gateway chart
+		// for the previous minor has the backported schema updates.
+		gwArgs := versionArgs
+		if version != "" {
+			gwArgs += " --skip-schema-validation"
+		}
+		err = h.InstallChart(
+			IngressReleaseName, gatewayChartPath, nsConfig.Get(IngressReleaseName),
+			gatewayOverrideValuesFile, Timeout, gwArgs)
 		if err != nil {
 			t.Fatalf("failed to install istio %s chart: %v", GatewayChartsDir, err)
 		}
@@ -480,7 +508,7 @@ func SetRevisionTagWithVersion(ctx framework.TestContext, h *helm.Helm, revision
 		IstioNamespace, "templates/revision-tags.yaml", Timeout, "--version", "~"+version, "--repo", ctx.Settings().HelmRepo, "--set",
 		fmt.Sprintf("revision=%s", revision), "--set", fmt.Sprintf("revisionTags={%s}", revisionTag))
 	if err != nil {
-		ctx.Fatalf("failed to install istio %s chart", DiscoveryChartsDir)
+		ctx.Fatalf("failed to template istio %s chart", DiscoveryChartsDir)
 	}
 
 	err = ctx.ConfigIstio().YAML(IstioNamespace, template).Apply()
@@ -494,7 +522,7 @@ func SetRevisionTagWithVersion(ctx framework.TestContext, h *helm.Helm, revision
 func SetRevisionTag(ctx framework.TestContext, h *helm.Helm, fileSuffix, revision, revisionTag, relPath, version string) {
 	scopes.Framework.Infof("=== setting revision tag === ")
 	template, err := h.Template(IstiodReleaseName+"-"+revision, filepath.Join(relPath, version, ControlChartsDir, DiscoveryChartsDir)+fileSuffix,
-		IstioNamespace, "templates/revision-tags.yaml", Timeout, "--set",
+		IstioNamespace, "templates/revision-tags-mwc.yaml", Timeout, "--set",
 		fmt.Sprintf("revision=%s", revision), "--set", fmt.Sprintf("revisionTags={%s}", revisionTag))
 	if err != nil {
 		ctx.Fatalf("failed to install istio %s chart", DiscoveryChartsDir)

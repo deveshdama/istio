@@ -125,7 +125,7 @@ func (c *ingressImpl) getAddressesInner(port int) ([]string, []int, error) {
 				return nil, false, fmt.Errorf("the DNS for %q not ready: %v", host, lookupErr)
 			}
 		}
-		return
+		return rawAddrs, completed, err
 	}, getAddressTimeout, getAddressDelay)
 	if err != nil {
 		return nil, nil, err
@@ -189,6 +189,11 @@ func (c *ingressImpl) TCPAddresses() ([]string, []int) {
 // HTTPSAddresses returns the externally reachable TCP hosts and port (443) of the component.
 func (c *ingressImpl) HTTPSAddresses() ([]string, []int) {
 	return c.AddressesForPort(443)
+}
+
+// HBONEAddresses returns the externally reachable HBONE hosts and port (15008) of the component.
+func (c *ingressImpl) HBONEAddresses() ([]string, []int) {
+	return c.AddressesForPort(15008)
 }
 
 // DiscoveryAddresses returns the externally reachable discovery addresses (15012) of the component.

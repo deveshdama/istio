@@ -99,7 +99,7 @@ func (configgen *ConfigGeneratorImpl) BuildDeltaClusters(proxy *model.Proxy, upd
 		// Inbound clusters don't have svchost in its format. So don't add it to serviceClusters.
 		if dir == model.TrafficDirectionInbound {
 			// Append all inbound clusters because in both stow/delta we always build all inbound clusters.
-			// In reality, the delta building is only for outbound clusters. We need to revist here once we support delta for inbound.
+			// In reality, the delta building is only for outbound clusters. We need to revisit here once we support delta for inbound.
 			// So deletedClusters.Difference(builtClusters) would give us the correct deleted inbound clusters.
 			deletedClusters.Insert(cluster)
 		} else {
@@ -271,7 +271,7 @@ func (configgen *ConfigGeneratorImpl) buildClusters(proxy *model.Proxy, req *mod
 
 	// OutboundTunnel cluster is needed for sidecar and gateway.
 	if features.EnableHBONESend && proxy.Type != model.Waypoint && bool(!proxy.Metadata.DisableHBONESend) {
-		clusters = append(clusters, cb.buildConnectOriginate(proxy, req.Push, nil))
+		clusters = append(clusters, cb.buildConnectOriginate(ConnectOriginate, proxy, req.Push, nil))
 	}
 
 	// if credential socket exists, create a cluster for it
@@ -312,7 +312,7 @@ func (configgen *ConfigGeneratorImpl) buildOutboundClusters(cb *ClusterBuilder, 
 	efKeys := cp.efw.KeysApplyingTo(networking.EnvoyFilter_CLUSTER)
 	hit, miss := 0, 0
 	for _, service := range services {
-		if service.Resolution == model.Alias {
+		if service.Resolution == model.Alias || service.Resolution == model.DynamicDNS {
 			continue
 		}
 		for _, port := range service.Ports {
@@ -361,6 +361,9 @@ func (configgen *ConfigGeneratorImpl) buildOutboundClusters(cb *ClusterBuilder, 
 			subsetClusters := cb.applyDestinationRule(defaultCluster, DefaultClusterMode, service, port,
 				clusterKey.endpointBuilder, clusterKey.destinationRule.GetRule(), clusterKey.serviceAccounts)
 
+			if service.UseInferenceSemantics() && proxy.Type == model.Router {
+				cb.applyOverrideHostPolicy(defaultCluster)
+			}
 			if patched := cp.patch(nil, defaultCluster.build()); patched != nil {
 				resources = append(resources, patched)
 				if features.EnableCDSCaching {
@@ -397,9 +400,6 @@ func (p clusterPatcher) patch(hosts []host.Name, c *cluster.Cluster) *discovery.
 }
 
 func (p clusterPatcher) doPatch(hosts []host.Name, c *cluster.Cluster) *cluster.Cluster {
-	if !envoyfilter.ShouldKeepCluster(p.pctx, p.efw, c, hosts) {
-		return nil
-	}
 	return envoyfilter.ApplyClusterMerge(p.pctx, p.efw, c, hosts)
 }
 

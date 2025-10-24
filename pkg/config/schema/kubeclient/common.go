@@ -27,6 +27,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/metadata"
 	"k8s.io/client-go/tools/cache"
+	gatewayapiinferenceclient "sigs.k8s.io/gateway-api-inference-extension/client-go/clientset/versioned"
 	gatewayapiclient "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned"
 
 	istioclient "istio.io/client-go/pkg/clientset/versioned"
@@ -58,6 +59,9 @@ type ClientGetter interface {
 
 	// GatewayAPI returns the gateway-api kube client.
 	GatewayAPI() gatewayapiclient.Interface
+
+	// GatewayAPIInference returns the gateway-api-inference-extension kube client.
+	GatewayAPIInference() gatewayapiinferenceclient.Interface
 
 	// Informers returns an informer factory.
 	Informers() informerfactory.InformerFactory
@@ -193,12 +197,14 @@ func Register[T runtime.Object](
 	gvk schema.GroupVersionKind,
 	list func(c ClientGetter, namespace string, o metav1.ListOptions) (runtime.Object, error),
 	watch func(c ClientGetter, namespace string, o metav1.ListOptions) (watch.Interface, error),
+	write func(c ClientGetter, namespace string) ktypes.WriteAPI[T],
 ) {
 	reg := &internalTypeReg[T]{
 		gvr:   gvr,
 		gvk:   config.FromKubernetesGVK(gvk),
 		list:  list,
 		watch: watch,
+		write: write,
 	}
 	kubetypes.Register[T](reg)
 	typemap.Set[TypeRegistration[T]](registerTypes, reg)
@@ -209,14 +215,18 @@ func Register[T runtime.Object](
 type TypeRegistration[T runtime.Object] interface {
 	kubetypes.RegisterType[T]
 
-	// ListWatchFunc provides the necessary methods for list and
+	// ListWatch provides the necessary methods for list and
 	// watch for the informer
 	ListWatch(c ClientGetter, opts ktypes.InformerOptions) cache.ListerWatcher
+
+	// Write returns a writer interface. This may return nil if the registration is not writeable
+	Write(c ClientGetter, namespace string) ktypes.WriteAPI[T]
 }
 
 type internalTypeReg[T runtime.Object] struct {
 	list  func(c ClientGetter, namespace string, o metav1.ListOptions) (runtime.Object, error)
 	watch func(c ClientGetter, namespace string, o metav1.ListOptions) (watch.Interface, error)
+	write func(c ClientGetter, namespace string) ktypes.WriteAPI[T]
 	gvr   schema.GroupVersionResource
 	gvk   config.GroupVersionKind
 }
@@ -227,6 +237,13 @@ func (t *internalTypeReg[T]) GetGVK() config.GroupVersionKind {
 
 func (t *internalTypeReg[T]) GetGVR() schema.GroupVersionResource {
 	return t.gvr
+}
+
+func (t *internalTypeReg[T]) Write(c ClientGetter, namespace string) ktypes.WriteAPI[T] {
+	if t.write == nil {
+		return nil
+	}
+	return t.write(c, namespace)
 }
 
 func (t *internalTypeReg[T]) ListWatch(c ClientGetter, o ktypes.InformerOptions) cache.ListerWatcher {

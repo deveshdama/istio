@@ -41,14 +41,17 @@ import (
 // applyTrafficPolicy applies the trafficPolicy defined within destinationRule,
 // which can be called for both outbound and inbound cluster, but only connection pool will be applied to inbound cluster.
 func (cb *ClusterBuilder) applyTrafficPolicy(service *model.Service, opts buildClusterOpts) {
-	connectionPool, outlierDetection, loadBalancer, tls, proxyProtocol := selectTrafficPolicyComponents(opts.policy)
+	connectionPool, outlierDetection, loadBalancer, tls, proxyProtocol, retryBudget := selectTrafficPolicyComponents(opts.policy)
 	// Connection pool settings are applicable for both inbound and outbound clusters.
 	if connectionPool == nil {
 		connectionPool = &networking.ConnectionPoolSettings{}
 	}
-	cb.applyConnectionPool(opts.mesh, opts.mutable, connectionPool)
+	// Apply h2 upgrade s.t. h2 connection pool settings can be applied to the cluster.
 	if opts.direction != model.TrafficDirectionInbound {
 		cb.applyH2Upgrade(opts.mutable, opts.port, opts.mesh, connectionPool)
+	}
+	cb.applyConnectionPool(opts.mesh, opts.mutable, connectionPool, retryBudget)
+	if opts.direction != model.TrafficDirectionInbound {
 		applyOutlierDetection(service, opts.mutable.cluster, outlierDetection)
 		applyLoadBalancer(service, opts.mutable.cluster, loadBalancer, opts.port, cb.locality, cb.proxyLabels, opts.mesh)
 		if opts.clusterMode != SniDnatClusterMode {
@@ -72,28 +75,33 @@ func selectTrafficPolicyComponents(policy *networking.TrafficPolicy) (
 	*networking.LoadBalancerSettings,
 	*networking.ClientTLSSettings,
 	*networking.TrafficPolicy_ProxyProtocol,
+	*networking.TrafficPolicy_RetryBudget,
 ) {
 	if policy == nil {
-		return nil, nil, nil, nil, nil
+		return nil, nil, nil, nil, nil, nil
 	}
 	connectionPool := policy.ConnectionPool
 	outlierDetection := policy.OutlierDetection
 	loadBalancer := policy.LoadBalancer
 	tls := policy.Tls
 	proxyProtocol := policy.ProxyProtocol
+	retryBudget := policy.RetryBudget
 
-	return connectionPool, outlierDetection, loadBalancer, tls, proxyProtocol
+	return connectionPool, outlierDetection, loadBalancer, tls, proxyProtocol, retryBudget
 }
 
 // FIXME: there isn't a way to distinguish between unset values and zero values
 func (cb *ClusterBuilder) applyConnectionPool(mesh *meshconfig.MeshConfig,
 	mc *clusterWrapper, settings *networking.ConnectionPoolSettings,
+	retryBudget *networking.TrafficPolicy_RetryBudget,
 ) {
 	if settings == nil {
 		return
 	}
 
 	threshold := getDefaultCircuitBreakerThresholds()
+	applyRetryBudget(threshold, retryBudget)
+
 	var idleTimeout *durationpb.Duration
 	var maxRequestsPerConnection uint32
 	var maxConcurrentStreams uint32
@@ -101,11 +109,9 @@ func (cb *ClusterBuilder) applyConnectionPool(mesh *meshconfig.MeshConfig,
 
 	if settings.Http != nil {
 		if settings.Http.Http2MaxRequests > 0 {
-			// Envoy only applies MaxRequests in HTTP/2 clusters
 			threshold.MaxRequests = &wrapperspb.UInt32Value{Value: uint32(settings.Http.Http2MaxRequests)}
 		}
 		if settings.Http.Http1MaxPendingRequests > 0 {
-			// Envoy only applies MaxPendingRequests in HTTP/1.1 clusters
 			threshold.MaxPendingRequests = &wrapperspb.UInt32Value{Value: uint32(settings.Http.Http1MaxPendingRequests)}
 		}
 
@@ -173,6 +179,29 @@ func (cb *ClusterBuilder) applyConnectionPool(mesh *meshconfig.MeshConfig,
 	}
 }
 
+func applyRetryBudget(
+	thresholds *cluster.CircuitBreakers_Thresholds,
+	retryBudget *networking.TrafficPolicy_RetryBudget,
+) {
+	if retryBudget == nil {
+		return
+	}
+
+	percent := &xdstype.Percent{Value: 0.2} // default to 20%
+	if retryBudget.Percent != nil {
+		percent = &xdstype.Percent{Value: retryBudget.Percent.Value}
+	}
+	retryConcurrency := &wrapperspb.UInt32Value{Value: 3} // default to	3
+	if retryBudget.MinRetryConcurrency > 0 {
+		retryConcurrency = &wrapperspb.UInt32Value{Value: retryBudget.MinRetryConcurrency}
+	}
+
+	thresholds.RetryBudget = &cluster.CircuitBreakers_Thresholds_RetryBudget{
+		BudgetPercent:       percent,
+		MinRetryConcurrency: retryConcurrency,
+	}
+}
+
 // applyH2Upgrade function will upgrade cluster to http2 if specified by configuration.
 // applyH2Upgrade can only be called for outbound cluster
 func (cb *ClusterBuilder) applyH2Upgrade(mc *clusterWrapper, port *model.Port,
@@ -199,7 +228,7 @@ func shouldH2Upgrade(clusterName string, port *model.Port, mesh *meshconfig.Mesh
 			return false
 		}
 		// If user wants an upgrade at destination rule/port level that means he is sure that
-		// it is a Http port - upgrade in such case. This is useful incase protocol sniffing is
+		// it is a Http port - upgrade in such case. This is useful in case protocol sniffing is
 		// enabled and user wants to upgrade/preserve http protocol from client.
 		if override == networking.ConnectionPoolSettings_HTTPSettings_UPGRADE {
 			log.Debugf("Upgrading cluster: %v (%v %v)", clusterName, mesh.H2UpgradePolicy, override)

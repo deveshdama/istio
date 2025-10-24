@@ -144,13 +144,15 @@ func NewConfigGenTest(t test.Failer, opts TestOptions) *ConfigGenTest {
 		xdsUpdater = model.NewEndpointIndexUpdater(env.EndpointIndex)
 	}
 
-	serviceDiscovery := aggregate.NewController(aggregate.Options{})
+	serviceDiscovery := aggregate.NewController(aggregate.Options{
+		ConfigClusterID: opts.ClusterID,
+	})
 	se := serviceentry.NewController(
 		configController,
 		xdsUpdater,
 		env.Watcher,
 		serviceentry.WithClusterID(opts.ClusterID))
-	// TODO allow passing in registry, for k8s, mem reigstry
+	// TODO allow passing in registry, for k8s, mem registry
 	serviceDiscovery.AddRegistry(se)
 	msd := memregistry.NewServiceDiscovery(opts.Services...)
 	msd.XdsUpdater = xdsUpdater

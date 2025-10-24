@@ -456,10 +456,6 @@ func MergeAnyWithAny(dst *anypb.Any, src *anypb.Any) (*anypb.Any, error) {
 // AppendLbEndpointMetadata adds metadata values to a lb endpoint using the passed in metadata as base.
 func AppendLbEndpointMetadata(istioMetadata *model.EndpointMetadata, envoyMetadata *core.Metadata,
 ) {
-	if !features.EndpointTelemetryLabel || !features.EnableTelemetryLabel {
-		return
-	}
-
 	if envoyMetadata.FilterMetadata == nil {
 		envoyMetadata.FilterMetadata = map[string]*structpb.Struct{}
 	}
@@ -477,7 +473,7 @@ func AppendLbEndpointMetadata(istioMetadata *model.EndpointMetadata, envoyMetada
 	// server does not have sidecar injected, and request fails to reach server and thus metadata exchange does not happen.
 	// Due to performance concern, telemetry metadata is compressed into a semicolon separated string:
 	// workload-name;namespace;canonical-service-name;canonical-service-revision;cluster-id.
-	if features.EndpointTelemetryLabel {
+	if features.EnableTelemetryLabel && features.EndpointTelemetryLabel {
 		// allow defaulting for non-injected cases
 		canonicalName, canonicalRevision := kubelabels.CanonicalService(istioMetadata.Labels, istioMetadata.WorkloadName)
 
@@ -723,6 +719,24 @@ func BuildTunnelMetadataStruct(address string, port int, waypoint string) *struc
 	}
 	if waypoint != "" {
 		m["waypoint"] = waypoint
+	}
+	st, _ := structpb.NewStruct(m)
+	return st
+}
+
+func AppendDoubleHBONEMetadata(service string, port int, envoyMetadata *core.Metadata) {
+	if envoyMetadata.FilterMetadata == nil {
+		envoyMetadata.FilterMetadata = map[string]*structpb.Struct{}
+	}
+	target := buildDoubleHBONEMetadataStruct(service, port)
+	addIstioEndpointLabel(envoyMetadata, "double_hbone", structpb.NewStructValue(target))
+}
+
+func buildDoubleHBONEMetadataStruct(service string, port int) *structpb.Struct {
+	m := map[string]interface{}{
+		// the actual service domain name and port that we want to connect to, these are used
+		// in the HTTP2 CONNECT request :authority
+		"hbone_target_address": DomainName(service, port),
 	}
 	st, _ := structpb.NewStruct(m)
 	return st

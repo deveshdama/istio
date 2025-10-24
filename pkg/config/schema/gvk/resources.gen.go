@@ -13,9 +13,9 @@ import (
 var (
 	AuthorizationPolicy            = config.GroupVersionKind{Group: "security.istio.io", Version: "v1", Kind: "AuthorizationPolicy"}
 	AuthorizationPolicy_v1beta1    = config.GroupVersionKind{Group: "security.istio.io", Version: "v1beta1", Kind: "AuthorizationPolicy"}
-	BackendTLSPolicy               = config.GroupVersionKind{Group: "gateway.networking.k8s.io", Version: "v1alpha3", Kind: "BackendTLSPolicy"}
+	BackendTLSPolicy               = config.GroupVersionKind{Group: "gateway.networking.k8s.io", Version: "v1", Kind: "BackendTLSPolicy"}
 	CertificateSigningRequest      = config.GroupVersionKind{Group: "certificates.k8s.io", Version: "v1", Kind: "CertificateSigningRequest"}
-	ClusterTrustBundle             = config.GroupVersionKind{Group: "certificates.k8s.io", Version: "v1alpha1", Kind: "ClusterTrustBundle"}
+	ClusterTrustBundle             = config.GroupVersionKind{Group: "certificates.k8s.io", Version: "v1beta1", Kind: "ClusterTrustBundle"}
 	ConfigMap                      = config.GroupVersionKind{Group: "", Version: "v1", Kind: "ConfigMap"}
 	CustomResourceDefinition       = config.GroupVersionKind{Group: "apiextensions.k8s.io", Version: "v1", Kind: "CustomResourceDefinition"}
 	DaemonSet                      = config.GroupVersionKind{Group: "apps", Version: "v1", Kind: "DaemonSet"}
@@ -23,7 +23,7 @@ var (
 	DestinationRule                = config.GroupVersionKind{Group: "networking.istio.io", Version: "v1", Kind: "DestinationRule"}
 	DestinationRule_v1alpha3       = config.GroupVersionKind{Group: "networking.istio.io", Version: "v1alpha3", Kind: "DestinationRule"}
 	DestinationRule_v1beta1        = config.GroupVersionKind{Group: "networking.istio.io", Version: "v1beta1", Kind: "DestinationRule"}
-	EndpointSlice                  = config.GroupVersionKind{Group: "", Version: "v1", Kind: "EndpointSlice"}
+	EndpointSlice                  = config.GroupVersionKind{Group: "discovery.k8s.io", Version: "v1", Kind: "EndpointSlice"}
 	Endpoints                      = config.GroupVersionKind{Group: "", Version: "v1", Kind: "Endpoints"}
 	EnvoyFilter                    = config.GroupVersionKind{Group: "networking.istio.io", Version: "v1alpha3", Kind: "EnvoyFilter"}
 	GRPCRoute                      = config.GroupVersionKind{Group: "gateway.networking.k8s.io", Version: "v1", Kind: "GRPCRoute"}
@@ -38,6 +38,7 @@ var (
 	HTTPRoute_v1alpha2             = config.GroupVersionKind{Group: "gateway.networking.k8s.io", Version: "v1alpha2", Kind: "HTTPRoute"}
 	HTTPRoute_v1                   = config.GroupVersionKind{Group: "gateway.networking.k8s.io", Version: "v1", Kind: "HTTPRoute"}
 	HorizontalPodAutoscaler        = config.GroupVersionKind{Group: "autoscaling", Version: "v2", Kind: "HorizontalPodAutoscaler"}
+	InferencePool                  = config.GroupVersionKind{Group: "inference.networking.k8s.io", Version: "v1", Kind: "InferencePool"}
 	Ingress                        = config.GroupVersionKind{Group: "networking.k8s.io", Version: "v1", Kind: "Ingress"}
 	IngressClass                   = config.GroupVersionKind{Group: "networking.k8s.io", Version: "v1", Kind: "IngressClass"}
 	KubernetesGateway              = config.GroupVersionKind{Group: "gateway.networking.k8s.io", Version: "v1beta1", Kind: "Gateway"}
@@ -85,6 +86,7 @@ var (
 	WorkloadGroup_v1alpha3         = config.GroupVersionKind{Group: "networking.istio.io", Version: "v1alpha3", Kind: "WorkloadGroup"}
 	WorkloadGroup_v1beta1          = config.GroupVersionKind{Group: "networking.istio.io", Version: "v1beta1", Kind: "WorkloadGroup"}
 	XBackendTrafficPolicy          = config.GroupVersionKind{Group: "gateway.networking.x-k8s.io", Version: "v1alpha1", Kind: "XBackendTrafficPolicy"}
+	XListenerSet                   = config.GroupVersionKind{Group: "gateway.networking.x-k8s.io", Version: "v1alpha1", Kind: "XListenerSet"}
 )
 
 // ToGVR converts a GVK to a GVR.
@@ -144,6 +146,8 @@ func ToGVR(g config.GroupVersionKind) (schema.GroupVersionResource, bool) {
 		return gvr.HTTPRoute_v1, true
 	case HorizontalPodAutoscaler:
 		return gvr.HorizontalPodAutoscaler, true
+	case InferencePool:
+		return gvr.InferencePool, true
 	case Ingress:
 		return gvr.Ingress, true
 	case IngressClass:
@@ -238,112 +242,126 @@ func ToGVR(g config.GroupVersionKind) (schema.GroupVersionResource, bool) {
 		return gvr.WorkloadGroup_v1beta1, true
 	case XBackendTrafficPolicy:
 		return gvr.XBackendTrafficPolicy, true
+	case XListenerSet:
+		return gvr.XListenerSet, true
 	}
 
 	return schema.GroupVersionResource{}, false
 }
 
-func MustToKind(g config.GroupVersionKind) kind.Kind {
+func ToKind(g config.GroupVersionKind) (kind.Kind, bool) {
 	switch g {
 	case AuthorizationPolicy:
-		return kind.AuthorizationPolicy
+		return kind.AuthorizationPolicy, true
 	case BackendTLSPolicy:
-		return kind.BackendTLSPolicy
+		return kind.BackendTLSPolicy, true
 	case CertificateSigningRequest:
-		return kind.CertificateSigningRequest
+		return kind.CertificateSigningRequest, true
 	case ClusterTrustBundle:
-		return kind.ClusterTrustBundle
+		return kind.ClusterTrustBundle, true
 	case ConfigMap:
-		return kind.ConfigMap
+		return kind.ConfigMap, true
 	case CustomResourceDefinition:
-		return kind.CustomResourceDefinition
+		return kind.CustomResourceDefinition, true
 	case DaemonSet:
-		return kind.DaemonSet
+		return kind.DaemonSet, true
 	case Deployment:
-		return kind.Deployment
+		return kind.Deployment, true
 	case DestinationRule:
-		return kind.DestinationRule
+		return kind.DestinationRule, true
 	case EndpointSlice:
-		return kind.EndpointSlice
+		return kind.EndpointSlice, true
 	case Endpoints:
-		return kind.Endpoints
+		return kind.Endpoints, true
 	case EnvoyFilter:
-		return kind.EnvoyFilter
+		return kind.EnvoyFilter, true
 	case GRPCRoute:
-		return kind.GRPCRoute
+		return kind.GRPCRoute, true
 	case Gateway:
-		return kind.Gateway
+		return kind.Gateway, true
 	case GatewayClass:
-		return kind.GatewayClass
+		return kind.GatewayClass, true
 	case HTTPRoute:
-		return kind.HTTPRoute
+		return kind.HTTPRoute, true
 	case HorizontalPodAutoscaler:
-		return kind.HorizontalPodAutoscaler
+		return kind.HorizontalPodAutoscaler, true
+	case InferencePool:
+		return kind.InferencePool, true
 	case Ingress:
-		return kind.Ingress
+		return kind.Ingress, true
 	case IngressClass:
-		return kind.IngressClass
+		return kind.IngressClass, true
 	case KubernetesGateway:
-		return kind.KubernetesGateway
+		return kind.KubernetesGateway, true
 	case Lease:
-		return kind.Lease
+		return kind.Lease, true
 	case MeshConfig:
-		return kind.MeshConfig
+		return kind.MeshConfig, true
 	case MeshNetworks:
-		return kind.MeshNetworks
+		return kind.MeshNetworks, true
 	case MutatingWebhookConfiguration:
-		return kind.MutatingWebhookConfiguration
+		return kind.MutatingWebhookConfiguration, true
 	case Namespace:
-		return kind.Namespace
+		return kind.Namespace, true
 	case Node:
-		return kind.Node
+		return kind.Node, true
 	case PeerAuthentication:
-		return kind.PeerAuthentication
+		return kind.PeerAuthentication, true
 	case Pod:
-		return kind.Pod
+		return kind.Pod, true
 	case PodDisruptionBudget:
-		return kind.PodDisruptionBudget
+		return kind.PodDisruptionBudget, true
 	case ProxyConfig:
-		return kind.ProxyConfig
+		return kind.ProxyConfig, true
 	case ReferenceGrant:
-		return kind.ReferenceGrant
+		return kind.ReferenceGrant, true
 	case RequestAuthentication:
-		return kind.RequestAuthentication
+		return kind.RequestAuthentication, true
 	case Secret:
-		return kind.Secret
+		return kind.Secret, true
 	case Service:
-		return kind.Service
+		return kind.Service, true
 	case ServiceAccount:
-		return kind.ServiceAccount
+		return kind.ServiceAccount, true
 	case ServiceEntry:
-		return kind.ServiceEntry
+		return kind.ServiceEntry, true
 	case Sidecar:
-		return kind.Sidecar
+		return kind.Sidecar, true
 	case StatefulSet:
-		return kind.StatefulSet
+		return kind.StatefulSet, true
 	case TCPRoute:
-		return kind.TCPRoute
+		return kind.TCPRoute, true
 	case TLSRoute:
-		return kind.TLSRoute
+		return kind.TLSRoute, true
 	case Telemetry:
-		return kind.Telemetry
+		return kind.Telemetry, true
 	case UDPRoute:
-		return kind.UDPRoute
+		return kind.UDPRoute, true
 	case ValidatingWebhookConfiguration:
-		return kind.ValidatingWebhookConfiguration
+		return kind.ValidatingWebhookConfiguration, true
 	case VirtualService:
-		return kind.VirtualService
+		return kind.VirtualService, true
 	case WasmPlugin:
-		return kind.WasmPlugin
+		return kind.WasmPlugin, true
 	case WorkloadEntry:
-		return kind.WorkloadEntry
+		return kind.WorkloadEntry, true
 	case WorkloadGroup:
-		return kind.WorkloadGroup
+		return kind.WorkloadGroup, true
 	case XBackendTrafficPolicy:
-		return kind.XBackendTrafficPolicy
+		return kind.XBackendTrafficPolicy, true
+	case XListenerSet:
+		return kind.XListenerSet, true
 	}
 
-	panic("unknown kind: " + g.String())
+	return kind.Unknown, false
+}
+
+func MustToKind(g config.GroupVersionKind) kind.Kind {
+	r, ok := ToKind(g)
+	if !ok {
+		panic("unknown kind: " + g.String())
+	}
+	return r
 }
 
 // MustToGVR converts a GVK to a GVR, and panics if it cannot be converted
@@ -393,6 +411,8 @@ func FromGVR(g schema.GroupVersionResource) (config.GroupVersionKind, bool) {
 		return HTTPRoute, true
 	case gvr.HorizontalPodAutoscaler:
 		return HorizontalPodAutoscaler, true
+	case gvr.InferencePool:
+		return InferencePool, true
 	case gvr.Ingress:
 		return Ingress, true
 	case gvr.IngressClass:
@@ -455,6 +475,8 @@ func FromGVR(g schema.GroupVersionResource) (config.GroupVersionKind, bool) {
 		return WorkloadGroup, true
 	case gvr.XBackendTrafficPolicy:
 		return XBackendTrafficPolicy, true
+	case gvr.XListenerSet:
+		return XListenerSet, true
 	}
 
 	return config.GroupVersionKind{}, false

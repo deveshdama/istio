@@ -11,7 +11,7 @@
         "thread": "%t"
       }
 {{- else }}
-        "text_format": "%Y-%m-%dT%T.%fZ\t%l\tenvoy %n %g:%#\t%v\tthread=%t"
+      "text_format": "%Y-%m-%dT%T.%fZ\t%l\tenvoy %n %g:%#\t%v\tthread=%t"
 {{- end }}
     }
   },
@@ -38,16 +38,16 @@
     "metadata": {{ .meta_json_str }}
   },
   "layered_runtime": {
-      "layers": [
-          {
-            "name": "global config",
-            "static_layer": {{ .runtime_flags }}
-          },
-          {
-              "name": "admin",
-              "admin_layer": {}
-          }
-      ]
+    "layers": [
+      {
+        "name": "global config",
+        "static_layer": {{ .runtime_flags }}
+      },
+      {
+        "name": "admin",
+        "admin_layer": {}
+      }
+    ]
   },
   "bootstrap_extensions": [
     {{- if .metadata_discovery }}
@@ -73,6 +73,12 @@
       }
     }
   ],
+  {{- if .stats_flush_interval }}
+  "stats_flush_interval": "{{ .stats_flush_interval }}",
+  {{- end }}
+  {{- if .stats_eviction_interval }}
+  "stats_eviction_interval": "{{ .stats_eviction_interval }}",
+  {{- end }}
   "stats_config": {
     "use_all_default_tags": false,
     "stats_tags": [
@@ -570,10 +576,8 @@
             "port_value": {{ .envoy_prometheus_port }}
           }
         },
-        {{- if .bypass_overload_manager}}
         "ignore_global_conn_limit": true,
         "bypass_overload_manager": true,
-        {{ end}}
         {{- if .dual_stack }}
         "additionalAddresses": [
           {
@@ -672,10 +676,8 @@
              "port_value": {{ .envoy_status_port }}
            }
         },
-        {{- if .bypass_overload_manager}}
         "ignore_global_conn_limit": true,
         "bypass_overload_manager": true,
-        {{ end}}
         {{- if .dual_stack }}
         "additionalAddresses": [
           {
@@ -689,6 +691,17 @@
           }
         ],
         {{- end}}
+        {{- if .envoy_status_port_enable_proxy_protocol }}
+        "listener_filters": [
+          {
+            "name": "envoy.listener.proxy_protocol",
+            "typed_config": {
+              "@type": "type.googleapis.com/envoy.extensions.filters.listener.proxy_protocol.v3.ProxyProtocol",
+              "allow_requests_without_proxy_protocol": true,
+            }
+          }
+        ],
+        {{- end }}
         "filter_chains": [
           {
             "filters": [
@@ -729,6 +742,17 @@
             ]
           }
         ]
+      }
+    ]
+  },
+  "overload_manager": {
+    "resource_monitors": [
+      {
+        "name": "envoy.resource_monitors.global_downstream_max_connections",
+        "typed_config": {
+          "@type": "type.googleapis.com/envoy.extensions.resource_monitors.downstream_connections.v3.DownstreamConnectionsConfig",
+          "max_active_downstream_connections": 2147483647
+        }
       }
     ]
   }

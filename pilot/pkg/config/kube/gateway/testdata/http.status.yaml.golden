@@ -1,7 +1,22 @@
+apiVersion: inference.networking.k8s.io/v1
+kind: InferencePool
+metadata:
+  name: infpool-gen
+  namespace: default
+spec: null
+status: {}
+---
+apiVersion: inference.networking.k8s.io/v1
+kind: InferencePool
+metadata:
+  name: infpool-gen2
+  namespace: default
+spec: null
+status: {}
+---
 apiVersion: gateway.networking.k8s.io/v1beta1
 kind: GatewayClass
 metadata:
-  creationTimestamp: null
   name: istio
 spec: null
 status:
@@ -15,7 +30,6 @@ status:
 apiVersion: gateway.networking.k8s.io/v1beta1
 kind: Gateway
 metadata:
-  creationTimestamp: null
   name: gateway
   namespace: istio-system
 spec: null
@@ -35,7 +49,7 @@ status:
     status: "True"
     type: Programmed
   listeners:
-  - attachedRoutes: 10
+  - attachedRoutes: 11
     conditions:
     - lastTransitionTime: fake
       message: No errors found
@@ -67,7 +81,6 @@ status:
 apiVersion: gateway.networking.k8s.io/v1beta1
 kind: HTTPRoute
 metadata:
-  creationTimestamp: null
   name: http
   namespace: default
 spec: null
@@ -92,7 +105,6 @@ status:
 apiVersion: gateway.networking.k8s.io/v1beta1
 kind: HTTPRoute
 metadata:
-  creationTimestamp: null
   name: http-not-selected
   namespace: default
 spec: null
@@ -117,7 +129,6 @@ status:
 apiVersion: gateway.networking.k8s.io/v1beta1
 kind: HTTPRoute
 metadata:
-  creationTimestamp: null
   name: http-retry-request
   namespace: default
 spec: null
@@ -142,7 +153,6 @@ status:
 apiVersion: gateway.networking.k8s.io/v1beta1
 kind: HTTPRoute
 metadata:
-  creationTimestamp: null
   name: http-route-cors
   namespace: default
 spec: null
@@ -167,7 +177,6 @@ status:
 apiVersion: gateway.networking.k8s.io/v1beta1
 kind: HTTPRoute
 metadata:
-  creationTimestamp: null
   name: http-timeout-backend-request
   namespace: default
 spec: null
@@ -192,7 +201,6 @@ status:
 apiVersion: gateway.networking.k8s.io/v1beta1
 kind: HTTPRoute
 metadata:
-  creationTimestamp: null
   name: http-timeout-request
   namespace: default
 spec: null
@@ -217,7 +225,6 @@ status:
 apiVersion: gateway.networking.k8s.io/v1beta1
 kind: HTTPRoute
 metadata:
-  creationTimestamp: null
   name: http2
   namespace: default
 spec: null
@@ -242,7 +249,6 @@ status:
 apiVersion: gateway.networking.k8s.io/v1beta1
 kind: HTTPRoute
 metadata:
-  creationTimestamp: null
   name: mirror
   namespace: default
 spec: null
@@ -267,7 +273,30 @@ status:
 apiVersion: gateway.networking.k8s.io/v1beta1
 kind: HTTPRoute
 metadata:
-  creationTimestamp: null
+  name: multiple-inferencepool-backend-refs
+  namespace: default
+spec: null
+status:
+  parents:
+  - conditions:
+    - lastTransitionTime: fake
+      message: Route was valid
+      reason: Accepted
+      status: "True"
+      type: Accepted
+    - lastTransitionTime: fake
+      message: All references resolved
+      reason: ResolvedRefs
+      status: "True"
+      type: ResolvedRefs
+    controllerName: istio.io/gateway-controller
+    parentRef:
+      name: gateway
+      namespace: istio-system
+---
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: HTTPRoute
+metadata:
   name: redirect
   namespace: default
 spec: null
@@ -292,7 +321,6 @@ status:
 apiVersion: gateway.networking.k8s.io/v1beta1
 kind: HTTPRoute
 metadata:
-  creationTimestamp: null
   name: redirect-prefix-replace
   namespace: default
 spec: null
@@ -317,7 +345,6 @@ status:
 apiVersion: gateway.networking.k8s.io/v1beta1
 kind: HTTPRoute
 metadata:
-  creationTimestamp: null
   name: rewrite
   namespace: default
 spec: null

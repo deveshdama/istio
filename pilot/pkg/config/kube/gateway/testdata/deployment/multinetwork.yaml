@@ -10,6 +10,7 @@ metadata:
   annotations: {}
   labels:
     gateway.istio.io/managed: istio.io-gateway-controller
+    gateway.networking.k8s.io/gateway-class-name: istio
     gateway.networking.k8s.io/gateway-name: default
     istio.io/dataplane-mode: none
     topology.istio.io/network: network-1
@@ -27,6 +28,7 @@ metadata:
   annotations: {}
   labels:
     gateway.istio.io/managed: istio.io-gateway-controller
+    gateway.networking.k8s.io/gateway-class-name: istio
     gateway.networking.k8s.io/gateway-name: default
     istio.io/dataplane-mode: none
     topology.istio.io/network: network-1
@@ -50,6 +52,7 @@ spec:
         prometheus.io/scrape: "true"
       labels:
         gateway.istio.io/managed: istio.io-gateway-controller
+        gateway.networking.k8s.io/gateway-class-name: istio
         gateway.networking.k8s.io/gateway-name: default
         istio.io/dataplane-mode: none
         service.istio.io/canonical-name: default
@@ -97,6 +100,7 @@ spec:
         - name: ISTIO_CPU_LIMIT
           valueFrom:
             resourceFieldRef:
+              divisor: "1"
               resource: limits.cpu
         - name: PROXY_CONFIG
           value: |
@@ -108,10 +112,12 @@ spec:
         - name: GOMEMLIMIT
           valueFrom:
             resourceFieldRef:
+              divisor: "1"
               resource: limits.memory
         - name: GOMAXPROCS
           valueFrom:
             resourceFieldRef:
+              divisor: "1"
               resource: limits.cpu
         - name: ISTIO_META_CLUSTER_ID
           value: Kubernetes
@@ -230,6 +236,7 @@ metadata:
   annotations: {}
   labels:
     gateway.istio.io/managed: istio.io-gateway-controller
+    gateway.networking.k8s.io/gateway-class-name: istio
     gateway.networking.k8s.io/gateway-name: default
     istio.io/dataplane-mode: none
     topology.istio.io/network: network-1

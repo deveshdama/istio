@@ -127,6 +127,13 @@ type Service struct {
 	ResourceVersion string
 }
 
+// UseInferenceSemantics determines which logic we should use for Service
+// This allows InferencePools and Services to both be represented by Service, but have different
+// semantics.
+func (s *Service) UseInferenceSemantics() bool {
+	return s.Attributes.Labels[constants.InternalServiceSemantics] == constants.ServiceSemanticsInferencePool
+}
+
 func (s *Service) NamespacedName() types.NamespacedName {
 	return types.NamespacedName{Name: s.Attributes.Name, Namespace: s.Attributes.Namespace}
 }
@@ -181,6 +188,8 @@ const (
 	DNSRoundRobinLB
 	// Alias defines a Service that is an alias for another.
 	Alias
+	// DynamicDNS implies that the proxy will resolve a the address from SNI or host header for wildcard services
+	DynamicDNS
 )
 
 // String converts Resolution in to String.
@@ -295,6 +304,9 @@ const (
 	trafficDirectionOutboundSrvPrefix = string(TrafficDirectionOutbound) + "_"
 	// trafficDirectionInboundSrvPrefix the prefix for a DNS SRV type subset key
 	trafficDirectionInboundSrvPrefix = string(TrafficDirectionInbound) + "_"
+
+	// dnsCacheConfigNameSuffix is the suffix used for DNS cache config names
+	dnsCacheConfigNameSuffix = "_dfp_dns_cache"
 )
 
 // ServiceInstance represents an individual instance of a specific version
@@ -962,6 +974,8 @@ type WaypointKey struct {
 
 	Network   string
 	Addresses []string
+
+	IsNetworkGateway bool
 }
 
 // WaypointKeyForProxy builds a key from a proxy to lookup
@@ -975,8 +989,9 @@ func WaypointKeyForNetworkGatewayProxy(node *Proxy) WaypointKey {
 
 func waypointKeyForProxy(node *Proxy, externalAddresses bool) WaypointKey {
 	key := WaypointKey{
-		Namespace: node.ConfigNamespace,
-		Network:   node.Metadata.Network.String(),
+		Namespace:        node.ConfigNamespace,
+		Network:          node.Metadata.Network.String(),
+		IsNetworkGateway: externalAddresses, // true if this is a network gateway proxy, false if it is a regular waypoint proxy
 	}
 	for _, svct := range node.ServiceTargets {
 		key.Hostnames = append(key.Hostnames, svct.Service.Hostname.String())
@@ -1105,7 +1120,9 @@ type ServiceInfo struct {
 	// PortNames provides a mapping of ServicePort -> port names. Note these are only used internally, not sent over XDS
 	PortNames map[int32]ServicePortName
 	// Source is the type that introduced this service.
-	Source   TypedObject
+	Source TypedObject
+	// Scope of the service - either local or global based on namespace or service label matching
+	Scope    ServiceScope
 	Waypoint WaypointBindingStatus
 	// MarshaledAddress contains the pre-marshaled representation.
 	// Note: this is an Address -- not a Service.
@@ -1129,6 +1146,11 @@ const (
 	WaypointBound    ConditionType = "istio.io/WaypointBound"
 	ZtunnelAccepted  ConditionType = "ZtunnelAccepted"
 	WaypointAccepted ConditionType = "WaypointAccepted"
+	// WaypointMissing is set on a ServiceEntry with a wildcard hostname and not bound to a waypoint.
+	// It is used to inform the user that the ServiceEntry will not be active until it is bound to a waypoint.
+	WaypointMissing ConditionType = "istio.io/WaypointMissing"
+
+	NoWaypointForWildcardService string = "NoWaypointForWildcardService"
 )
 
 type ConditionSet = map[ConditionType]*Condition
@@ -1153,6 +1175,10 @@ func (i ServiceInfo) GetConditions() ConditionSet {
 		// This ensures we can properly prune the condition if its no longer needed (such as if there is no waypoint attached at all).
 		WaypointBound: nil,
 	}
+	if host.Name(i.Service.Hostname).IsWildCarded() && i.Source.Kind == kind.ServiceEntry {
+		// Only prune WaypointMissing condition if we have a wildcard service entry
+		set[WaypointMissing] = nil
+	}
 
 	if i.Waypoint.ResourceName != "" {
 		buildMsg := strings.Builder{}
@@ -1170,11 +1196,22 @@ func (i ServiceInfo) GetConditions() ConditionSet {
 			Reason:  string(WaypointAccepted),
 			Message: buildMsg.String(),
 		}
-	} else if i.Waypoint.Error != nil {
-		set[WaypointBound] = &Condition{
-			Status:  false,
-			Reason:  i.Waypoint.Error.Reason,
-			Message: i.Waypoint.Error.Message,
+	} else {
+		if i.Waypoint.Error != nil {
+			set[WaypointBound] = &Condition{
+				Status:  false,
+				Reason:  i.Waypoint.Error.Reason,
+				Message: i.Waypoint.Error.Message,
+			}
+		}
+		if host.Name(i.Service.Hostname).IsWildCarded() && i.Source.Kind == kind.ServiceEntry {
+			buildMsg := strings.Builder{}
+			buildMsg.WriteString("ServiceEntry will not apply until it is bound to a valid waypoint.")
+			set[WaypointMissing] = &Condition{
+				Status:  true,
+				Reason:  NoWaypointForWildcardService,
+				Message: buildMsg.String(),
+			}
 		}
 	}
 
@@ -1217,6 +1254,7 @@ func (i ServiceInfo) Equals(other ServiceInfo) bool {
 		maps.Equal(i.LabelSelector.Labels, other.LabelSelector.Labels) &&
 		maps.Equal(i.PortNames, other.PortNames) &&
 		i.Source == other.Source &&
+		i.Scope == other.Scope &&
 		i.Waypoint.Equals(other.Waypoint)
 }
 
@@ -1227,6 +1265,19 @@ func (i ServiceInfo) ResourceName() string {
 func serviceResourceName(s *workloadapi.Service) string {
 	return s.Namespace + "/" + s.Hostname
 }
+
+type ServiceScope string
+
+const (
+	// Local ServiceScope specifies that istiod will not automatically expose the matching services' endpoints at the
+	// cluster's east/west gateway. Istio will also not automatically share locolly matching endpoints with the
+	// cluster's local dataplane that are not within the local cluster.
+	Local ServiceScope = "LOCAL"
+	// Global ServiceScope specifies that istiod will automatically expose the matching services' endpoints at the
+	// cluster's east/west gateway. Istio will also automatically share globally matching endpoints with the cluster's
+	// local dataplane that are in the local and remote clusters.
+	Global ServiceScope = "GLOBAL"
+)
 
 type WorkloadInfo struct {
 	Workload *workloadapi.Workload
@@ -1558,6 +1609,11 @@ func BuildDNSSrvSubsetKey(direction TrafficDirection, subsetName string, hostnam
 	return string(direction) + "_." + strconv.Itoa(port) + "_." + subsetName + "_." + string(hostname)
 }
 
+// BuildDNSCacheName generates a hostname specific DNS cache config name.
+func BuildDNSCacheName(hostname host.Name) string {
+	return hostname.String() + dnsCacheConfigNameSuffix
+}
+
 // IsValidSubsetKey checks if a string is valid for subset key parsing.
 func IsValidSubsetKey(s string) bool {
 	return strings.Count(s, "|") == 3
@@ -1600,28 +1656,28 @@ func ParseSubsetKey(s string) (direction TrafficDirection, subsetName string, ho
 	// Format: dir|port|subset|hostname
 	dir, s, ok := strings.Cut(s, sep)
 	if !ok {
-		return
+		return direction, subsetName, hostname, port
 	}
 	direction = TrafficDirection(dir)
 
 	p, s, ok := strings.Cut(s, sep)
 	if !ok {
-		return
+		return direction, subsetName, hostname, port
 	}
 	port, _ = strconv.Atoi(p)
 
 	ss, s, ok := strings.Cut(s, sep)
 	if !ok {
-		return
+		return direction, subsetName, hostname, port
 	}
 	subsetName = ss
 
 	// last part. No | remains -- verify this
 	if strings.Contains(s, sep) {
-		return
+		return direction, subsetName, hostname, port
 	}
 	hostname = host.Name(s)
-	return
+	return direction, subsetName, hostname, port
 }
 
 // GetAddressForProxy returns a Service's address specific to the cluster where the node resides

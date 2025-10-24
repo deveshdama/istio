@@ -29,6 +29,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	k8s "sigs.k8s.io/gateway-api/apis/v1"
 	"sigs.k8s.io/gateway-api/pkg/consts"
 	"sigs.k8s.io/yaml"
 
@@ -44,6 +45,7 @@ import (
 	"istio.io/istio/pkg/config"
 	"istio.io/istio/pkg/config/constants"
 	crdvalidation "istio.io/istio/pkg/config/crd"
+	"istio.io/istio/pkg/config/host"
 	"istio.io/istio/pkg/config/schema/gvk"
 	"istio.io/istio/pkg/config/schema/gvr"
 	"istio.io/istio/pkg/kube"
@@ -86,7 +88,28 @@ var services = []*model.Service{
 				},
 			},
 		},
-		Ports:    ports,
+		Ports: []*model.Port{
+			{
+				Name:     "http",
+				Port:     80,
+				Protocol: "HTTP",
+			},
+			{
+				Name:     "https",
+				Port:     443,
+				Protocol: "HTTPS",
+			},
+			{
+				Name:     "tcp",
+				Port:     34000,
+				Protocol: "TCP",
+			},
+			{
+				Name:     "tcp-other",
+				Port:     34001,
+				Protocol: "TCP",
+			},
+		},
 		Hostname: "istio-ingressgateway.istio-system.svc.domain.suffix",
 	},
 	{
@@ -103,6 +126,31 @@ var services = []*model.Service{
 		Ports:    ports,
 		Hostname: "httpbin.default.svc.domain.suffix",
 	},
+	{
+		Attributes: model.ServiceAttributes{
+			Namespace: "default",
+			Labels: map[string]string{
+				InferencePoolExtensionRefSvc:         "ext-proc-svc",
+				InferencePoolExtensionRefPort:        "9002",
+				InferencePoolExtensionRefFailureMode: "FailClose",
+			},
+		},
+		Ports:    ports,
+		Hostname: host.Name(fmt.Sprintf("%s.default.svc.domain.suffix", firstValue(InferencePoolServiceName("infpool-gen")))),
+	},
+	{
+		Attributes: model.ServiceAttributes{
+			Namespace: "default",
+			Labels: map[string]string{
+				InferencePoolExtensionRefSvc:         "ext-proc-svc-2",
+				InferencePoolExtensionRefPort:        "9002",
+				InferencePoolExtensionRefFailureMode: "FailClose",
+			},
+		},
+		Ports:    ports,
+		Hostname: host.Name(fmt.Sprintf("%s.default.svc.domain.suffix", firstValue(InferencePoolServiceName("infpool-gen2")))),
+	},
+
 	{
 		Attributes: model.ServiceAttributes{
 			Namespace: "apple",
@@ -393,6 +441,37 @@ D2lWusoe2/nEqfDVVWGWlyJ7yOmqaVm/iNUN9B2N2g==
 			Data: map[string][]byte{
 				"tls.crt": []byte(rsaCertPEM),
 				"tls.key": []byte(rsaKeyPEM),
+				"ca.crt":  []byte(rsaCertPEM),
+			},
+		},
+		&corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "ns2-cert",
+				Namespace: "ns2",
+			},
+			Data: map[string][]byte{
+				"tls.crt": []byte(rsaCertPEM),
+				"tls.key": []byte(rsaKeyPEM),
+			},
+		},
+		&corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "ns3-cert",
+				Namespace: "ns3",
+			},
+			Data: map[string][]byte{
+				"tls.crt": []byte(rsaCertPEM),
+				"tls.key": []byte(rsaKeyPEM),
+			},
+		},
+		&corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "ns4-cert",
+				Namespace: "ns4",
+			},
+			Data: map[string][]byte{
+				"tls.crt": []byte(rsaCertPEM),
+				"tls.key": []byte(rsaKeyPEM),
 			},
 		},
 		&corev1.Secret{
@@ -427,6 +506,33 @@ D2lWusoe2/nEqfDVVWGWlyJ7yOmqaVm/iNUN9B2N2g==
 				// and the certificate and the key are identical
 				"tls.crt": []byte("SGVsbG8gd29ybGQK"),
 				"tls.key": []byte("SGVsbG8gd29ybGQK"),
+			},
+		},
+		&corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "malformed",
+				Namespace: "istio-system",
+			},
+			Data: map[string]string{
+				"not-ca.crt": "hello",
+			},
+		},
+		&corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "malformed-trustbundle",
+				Namespace: "istio-system",
+			},
+			Data: map[string]string{
+				"ca.crt": "hello",
+			},
+		},
+		&corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "my-cert-http",
+				Namespace: "istio-system",
+			},
+			Data: map[string]string{
+				"ca.crt": rsaCertPEM,
 			},
 		},
 		&corev1.ConfigMap{
@@ -565,7 +671,14 @@ func TestConvertResources(t *testing.T) {
 				"istio-system/^not-allowed-echo-",
 			),
 		},
+		{
+			name: "reference-policy-inferencepool",
+			validationIgnorer: crdvalidation.NewValidationIgnorer(
+				"istio-system/^backend-not-allowed-",
+			),
+		},
 		{name: "serviceentry"},
+		{name: "status"},
 		{name: "eastwest"},
 		{name: "eastwest-tlsoption"},
 		{name: "eastwest-labelport"},
@@ -576,8 +689,24 @@ func TestConvertResources(t *testing.T) {
 		{name: "waypoint"},
 		{name: "isolation"},
 		{name: "backend-lb-policy"},
-		{name: "backend-tls-policy"},
+		{
+			name: "backend-tls-policy",
+			validationIgnorer: crdvalidation.NewValidationIgnorer(
+				"default/echo-https",
+				"default/external-service",
+				"default/multi-host-service",
+			),
+		},
 		{name: "mix-backend-policy"},
+		{name: "listenerset"},
+		{name: "listenerset-cross-namespace"},
+		{name: "listenerset-invalid"},
+		{
+			name: "listenerset-empty-listeners",
+			validationIgnorer: crdvalidation.NewValidationIgnorer(
+				"istio-system/parent-gateway",
+			),
+		},
 		{
 			name: "valid-invalid-parent-ref",
 			validationIgnorer: crdvalidation.NewValidationIgnorer(
@@ -586,28 +715,28 @@ func TestConvertResources(t *testing.T) {
 		},
 	}
 	test.SetForTest(t, &features.EnableGatewayAPIGatewayClassController, false)
+	test.SetForTest(t, &features.EnableGatewayAPIInferenceExtension, true)
+
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
 			stop := test.NewStop(t)
-			input := readConfig(t, fmt.Sprintf("testdata/%s.yaml", tt.name), validator, nil)
+			input := readConfig(t, fmt.Sprintf("testdata/%s.yaml", tt.name), validator, tt.validationIgnorer)
 			kc := kube.NewFakeClient(input...)
 			setupClientCRDs(t, kc)
 			// Setup a few preconfigured services
 			instances := []*model.ServiceInstance{}
 			for _, svc := range services {
-				instances = append(instances, &model.ServiceInstance{
-					Service:     svc,
-					ServicePort: ports[0],
-					Endpoint:    &model.IstioEndpoint{EndpointPort: 8080},
-				}, &model.ServiceInstance{
-					Service:     svc,
-					ServicePort: ports[1],
-					Endpoint:    &model.IstioEndpoint{},
-				}, &model.ServiceInstance{
-					Service:     svc,
-					ServicePort: ports[2],
-					Endpoint:    &model.IstioEndpoint{},
-				})
+				for i, port := range svc.Ports {
+					epPort := uint32(0)
+					if i == 0 {
+						epPort = 8080 // Just to make sure we test mismatch
+					}
+					instances = append(instances, &model.ServiceInstance{
+						Service:     svc,
+						ServicePort: port,
+						Endpoint:    &model.IstioEndpoint{EndpointPort: epPort},
+					})
+				}
 			}
 			cg := core.NewConfigGenTest(t, core.TestOptions{
 				Services:  services,
@@ -656,6 +785,7 @@ func setupClientCRDs(t *testing.T, kc kube.CLIClient) {
 	for _, crd := range []schema.GroupVersionResource{
 		gvr.KubernetesGateway,
 		gvr.ReferenceGrant,
+		gvr.XListenerSet,
 		gvr.GatewayClass,
 		gvr.HTTPRoute,
 		gvr.GRPCRoute,
@@ -664,9 +794,10 @@ func setupClientCRDs(t *testing.T, kc kube.CLIClient) {
 		gvr.ServiceEntry,
 		gvr.XBackendTrafficPolicy,
 		gvr.BackendTLSPolicy,
+		gvr.InferencePool,
 	} {
 		clienttest.MakeCRDWithAnnotations(t, kc, crd, map[string]string{
-			consts.BundleVersionAnnotation: "v1.1.0",
+			consts.BundleVersionAnnotation: consts.BundleVersion,
 		})
 	}
 }
@@ -1167,6 +1298,65 @@ func TestSortHTTPRoutes(t *testing.T) {
 	}
 }
 
+// Test is a little janky, but it checks if we can pass a `parent.Hostnames` in the form
+// of `*.example.com` and `*/*.example.com` without a panic and successfully match.
+func TestGatewayReferenceAllowedParentHostnameParsing(t *testing.T) {
+	cases := []struct {
+		Name            string
+		ParentHostnames []string
+		RouteHostnames  []k8s.Hostname
+	}{
+		{
+			Name:            "implied wildcard",
+			ParentHostnames: []string{"*.example.com"},
+			RouteHostnames:  []k8s.Hostname{"bookinfo.example.com"},
+		},
+		{
+			Name:            "explicit wildcard",
+			ParentHostnames: []string{"*/*.example.com"},
+			RouteHostnames:  []k8s.Hostname{"bookinfo.example.com"},
+		},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.Name, func(t *testing.T) {
+			// ctx doesn't end up getting used, but we need to pass something
+			ctx := RouteContext{}
+			routeKind := gvk.HTTPRoute
+			parent := parentInfo{
+				InternalName: "default/bookinfo-gateway-istio-autogenerated-k8s-gateway-http",
+				Hostnames:    []string{"*.example.com"},
+				AllowedKinds: []k8s.RouteGroupKind{
+					toRouteKind(gvk.HTTPRoute),
+					toRouteKind(gvk.GRPCRoute),
+				},
+				OriginalHostname: "",
+				SectionName:      "http",
+				Port:             80,
+				Protocol:         "HTTP",
+			}
+			parentRef := parentReference{
+				parentKey: parentKey{
+					Kind:      gvk.Gateway,
+					Name:      "bookinfo-gateway",
+					Namespace: "default",
+				},
+				SectionName: "",
+				Port:        0,
+			}
+			hostnames := []k8s.Hostname{"bookinfo.example.com"}
+
+			parentError, waypointError := referenceAllowed(ctx, &parent, routeKind, parentRef, hostnames, "default")
+			if parentError != nil {
+				t.Fatalf("expected no error, got %v", parentError)
+			}
+			if waypointError != nil {
+				t.Fatalf("expected no error, got %v", waypointError)
+			}
+		})
+	}
+}
+
 func TestReferencePolicy(t *testing.T) {
 	validator := crdvalidation.NewIstioValidator(t)
 	type res struct {
@@ -1316,7 +1506,7 @@ spec:
 			kr := setupController(t, input...)
 			for _, sc := range tt.expectations {
 				t.Run(fmt.Sprintf("%v/%v", sc.name, sc.namespace), func(t *testing.T) {
-					got := kr.SecretAllowed(sc.name, sc.namespace)
+					got := kr.SecretAllowed(gvk.KubernetesGateway, sc.name, sc.namespace)
 					if got != sc.allowed {
 						t.Fatalf("expected allowed=%v, got allowed=%v", sc.allowed, got)
 					}
@@ -1594,4 +1784,8 @@ func kubernetesObjectsFromString(s string) ([]runtime.Object, error) {
 		objects = append(objects, o)
 	}
 	return objects, nil
+}
+
+func firstValue[T, U any](val T, _ U) T {
+	return val
 }

@@ -28,6 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	kubeVersion "k8s.io/apimachinery/pkg/version"
 	fakediscovery "k8s.io/client-go/discovery/fake"
 	k8s "sigs.k8s.io/gateway-api/apis/v1"
@@ -45,6 +46,7 @@ import (
 	"istio.io/istio/pkg/config"
 	"istio.io/istio/pkg/config/constants"
 	"istio.io/istio/pkg/config/mesh"
+	"istio.io/istio/pkg/config/mesh/meshwatcher"
 	"istio.io/istio/pkg/config/schema/gvk"
 	"istio.io/istio/pkg/config/schema/gvr"
 	"istio.io/istio/pkg/kube"
@@ -62,6 +64,11 @@ import (
 	"istio.io/istio/pkg/test/util/assert"
 	"istio.io/istio/pkg/test/util/file"
 	"istio.io/istio/pkg/test/util/retry"
+)
+
+var (
+	copyLabelsAnnotationsEnabled  = true
+	copyLabelsAnnotationsDisabled = false
 )
 
 func TestConfigureIstioGateway(t *testing.T) {
@@ -138,6 +145,7 @@ func TestConfigureIstioGateway(t *testing.T) {
 		values                   string
 		discoveryNamespaceFilter kubetypes.DynamicObjectFilter
 		ignore                   bool
+		copyLabelsAnnotations    *bool
 	}{
 		{
 			name: "simple",
@@ -308,7 +316,7 @@ func TestConfigureIstioGateway(t *testing.T) {
 						Name:     "mesh",
 						Port:     k8s.PortNumber(15008),
 						Protocol: "ALL",
-						TLS: &k8s.GatewayTLSConfig{
+						TLS: &k8s.ListenerTLSConfig{
 							Mode: ptr.Of(k8s.TLSModeTerminate),
 							Options: map[k8s.AnnotationKey]k8s.AnnotationValue{
 								gatewayTLSTerminateModeKey: "ISTIO_MUTUAL",
@@ -501,9 +509,64 @@ metadata:
 			}),
 			values: ``,
 		},
+		{
+			name: "copy-labels-annotations-disabled-infra-set",
+			gw: k8sbeta.Gateway{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "default",
+					Namespace:   "default",
+					Labels:      map[string]string{"should-not": "see"},
+					Annotations: map[string]string{"should-not": "see"},
+				},
+				Spec: k8s.GatewaySpec{
+					GatewayClassName: k8s.ObjectName(features.GatewayAPIDefaultGatewayClass),
+					Infrastructure: &k8s.GatewayInfrastructure{
+						Labels:      map[k8s.LabelKey]k8s.LabelValue{"should": "see-infra-label"},
+						Annotations: map[k8s.AnnotationKey]k8s.AnnotationValue{"should": "see-infra-annotation"},
+					},
+				},
+			},
+			objects:               defaultObjects,
+			copyLabelsAnnotations: &copyLabelsAnnotationsDisabled,
+		},
+		{
+			name: "copy-labels-annotations-disabled-infra-nil",
+			gw: k8sbeta.Gateway{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "default",
+					Namespace:   "default",
+					Labels:      map[string]string{"should-not": "see"},
+					Annotations: map[string]string{"should-not": "see"},
+				},
+				Spec: k8s.GatewaySpec{
+					GatewayClassName: k8s.ObjectName(features.GatewayAPIDefaultGatewayClass),
+				},
+			},
+			objects:               defaultObjects,
+			copyLabelsAnnotations: &copyLabelsAnnotationsDisabled,
+		},
+		{
+			name: "copy-labels-annotations-enabled-infra-nil",
+			gw: k8sbeta.Gateway{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "default",
+					Namespace:   "default",
+					Labels:      map[string]string{"should": "see"},
+					Annotations: map[string]string{"should": "see"},
+				},
+				Spec: k8s.GatewaySpec{
+					GatewayClassName: k8s.ObjectName(features.GatewayAPIDefaultGatewayClass),
+				},
+			},
+			objects:               defaultObjects,
+			copyLabelsAnnotations: &copyLabelsAnnotationsEnabled,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			if tt.copyLabelsAnnotations != nil {
+				test.SetForTest(t, &features.EnableGatewayAPICopyLabelsAnnotations, *tt.copyLabelsAnnotations)
+			}
 			buf := &bytes.Buffer{}
 			client := kube.NewFakeClient(tt.objects...)
 			kube.SetObjectFilter(client, tt.discoveryNamespaceFilter)
@@ -512,9 +575,9 @@ metadata:
 			kclient.NewWriteClient[*k8sbeta.Gateway](client).Create(tt.gw.DeepCopy())
 			kclient.NewWriteClient[*appsv1.Deployment](client).Create(upgradeDeployment)
 			stop := test.NewStop(t)
-			env := model.NewEnvironment()
+			env := newTestEnv()
 			env.PushContext().ProxyConfigs = tt.pcs
-			tw := revisions.NewTagWatcher(client, "")
+			tw := revisions.NewTagWatcher(client, "", "istio-system")
 			go tw.Run(stop)
 			d := NewDeploymentController(client, cluster.ID(features.ClusterName), env, testInjectionConfig(t, tt.values), func(fn func()) {
 			}, tw, "", "")
@@ -550,6 +613,79 @@ metadata:
 	}
 }
 
+func TestMeshGatewayReconciliation(t *testing.T) {
+	c := kube.NewFakeClient(&corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "default",
+		},
+	})
+	tw := revisions.NewTagWatcher(c, "default", "istio-system")
+
+	// not using the new helper becase
+	// we need to explicitly modify this
+	// later in the thread
+	env := model.NewEnvironment()
+	m := mesh.DefaultMeshConfig()
+	watch := meshwatcher.NewTestWatcher(m)
+	env.Watcher = watch
+	d := NewDeploymentController(c, "", env, testInjectionConfig(t, ""), func(fn func()) {}, tw, "", "")
+
+	reconciles := atomic.NewInt32(0)
+	wantReconcile := int32(0)
+	expectReconciled := func() {
+		t.Helper()
+		wantReconcile++
+		assert.EventuallyEqual(t, reconciles.Load, wantReconcile, retry.Timeout(time.Second*5), retry.Message("no reconciliation"))
+	}
+
+	writes := make(chan string, 2)
+	d.patcher = func(g schema.GroupVersionResource, name string, namespace string, data []byte, subresources ...string) error {
+		if g == gvr.Service {
+			reconciles.Inc()
+		}
+		if g == gvr.KubernetesGateway {
+			b, err := yaml.JSONToYAML(data)
+			if err != nil {
+				return err
+			}
+			writes <- string(b)
+		}
+		return nil
+	}
+
+	stop := test.NewStop(t)
+	gws := clienttest.Wrap(t, d.gateways)
+	go tw.Run(stop)
+	go d.Run(stop)
+	c.RunAndWait(stop)
+	kube.WaitForCacheSync("test", stop, d.queue.HasSynced)
+
+	// create the initial gateway for the deployment controller
+	// to reconcile when the meshconfig changes
+	defaultGateway := &k8sbeta.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "gw",
+			Namespace: "default",
+		},
+		Spec: k8s.GatewaySpec{
+			GatewayClassName: k8s.ObjectName(features.GatewayAPIDefaultGatewayClass),
+		},
+	}
+	gws.Create(defaultGateway)
+	assert.Equal(t, assert.ChannelHasItem(t, writes), buildPatch())
+	expectReconciled()
+	assert.ChannelIsEmpty(t, writes)
+
+	// modify the meshconfig to trigger a reprocess of the gateways
+	m.DefaultConfig.Image = &istioio_networking_v1beta1.ProxyImage{ImageType: "distroless"}
+	watch.Set(m)
+
+	// confirm the gateway is reconciled
+	assert.ChannelHasItem(t, writes)
+	expectReconciled()
+	assert.ChannelIsEmpty(t, writes)
+}
+
 func buildFilter(allowedNamespace string) kubetypes.DynamicObjectFilter {
 	return kubetypes.NewStaticObjectFilter(func(obj any) bool {
 		if ns, ok := obj.(string); ok {
@@ -575,8 +711,8 @@ func TestVersionManagement(t *testing.T) {
 			Name: "default",
 		},
 	})
-	tw := revisions.NewTagWatcher(c, "default")
-	env := &model.Environment{}
+	tw := revisions.NewTagWatcher(c, "default", "istio-system")
+	env := newTestEnv()
 	d := NewDeploymentController(c, "", env, testInjectionConfig(t, ""), func(fn func()) {}, tw, "", "")
 	reconciles := atomic.NewInt32(0)
 	wantReconcile := int32(0)
@@ -616,7 +752,7 @@ func TestVersionManagement(t *testing.T) {
 		},
 	}
 	gws.Create(defaultGateway)
-	assert.Equal(t, assert.ChannelHasItem(t, writes), buildPatch(ControllerVersion))
+	assert.Equal(t, assert.ChannelHasItem(t, writes), buildPatch())
 	expectReconciled()
 	assert.ChannelIsEmpty(t, writes)
 	// Test fake doesn't actual do Apply, so manually do this
@@ -637,7 +773,7 @@ func TestVersionManagement(t *testing.T) {
 	defaultGateway.Annotations = map[string]string{}
 	gws.Update(defaultGateway)
 	expectReconciled()
-	assert.Equal(t, assert.ChannelHasItem(t, writes), buildPatch(ControllerVersion))
+	assert.Equal(t, assert.ChannelHasItem(t, writes), buildPatch())
 	assert.ChannelIsEmpty(t, writes)
 	// Test fake doesn't actual do Apply, so manually do this
 	defaultGateway.Annotations = map[string]string{ControllerVersionAnnotation: fmt.Sprint(ControllerVersion)}
@@ -650,7 +786,7 @@ func TestVersionManagement(t *testing.T) {
 	defaultGateway.Annotations = map[string]string{ControllerVersionAnnotation: fmt.Sprint(1)}
 	gws.Update(defaultGateway)
 	expectReconciled()
-	assert.Equal(t, assert.ChannelHasItem(t, writes), buildPatch(ControllerVersion))
+	assert.Equal(t, assert.ChannelHasItem(t, writes), buildPatch())
 	assert.ChannelIsEmpty(t, writes)
 	// Test fake doesn't actual do Apply, so manually do this
 	defaultGateway.Annotations = map[string]string{ControllerVersionAnnotation: fmt.Sprint(ControllerVersion)}
@@ -665,6 +801,317 @@ func TestVersionManagement(t *testing.T) {
 	assert.ChannelIsEmpty(t, writes)
 	// Do not expect reconcile
 	assert.Equal(t, reconciles.Load(), wantReconcile)
+}
+
+func TestHandlerEnqueueFunction(t *testing.T) {
+	defaultNamespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default"}}
+	defaultGatewayClass := &k8sbeta.GatewayClass{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: features.GatewayAPIDefaultGatewayClass,
+		},
+		Spec: k8s.GatewayClassSpec{
+			ControllerName: k8s.GatewayController(features.ManagedGatewayController),
+		},
+	}
+
+	defaultObjects := []runtime.Object{defaultNamespace, defaultGatewayClass}
+	discoveryNamespaceFilter := buildFilter(defaultNamespace.GetName())
+
+	tests := []struct {
+		name       string
+		event      controllers.Event
+		reconciles int32
+		objects    []runtime.Object
+	}{
+		{
+			name: "add event",
+			event: controllers.Event{
+				Event: controllers.EventAdd,
+				New: &k8sbeta.Gateway{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:        "new-add",
+						Namespace:   defaultNamespace.GetName(),
+						Labels:      map[string]string{"should": "see"},
+						Annotations: map[string]string{"should": "see"},
+					},
+					Spec: k8s.GatewaySpec{
+						GatewayClassName: k8s.ObjectName(features.GatewayAPIDefaultGatewayClass),
+					},
+				},
+			},
+			reconciles: int32(1),
+			objects:    defaultObjects,
+		},
+		{
+			name: "delete event",
+			event: controllers.Event{
+				Event: controllers.EventDelete,
+				Old: &k8sbeta.Gateway{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:        "old-delete",
+						Namespace:   defaultNamespace.GetName(),
+						Labels:      map[string]string{"should": "see"},
+						Annotations: map[string]string{"should": "see"},
+					},
+					Spec: k8s.GatewaySpec{
+						GatewayClassName: k8s.ObjectName(features.GatewayAPIDefaultGatewayClass),
+					},
+				},
+			},
+			reconciles: int32(1),
+			objects:    defaultObjects,
+		},
+		{
+			name: "update event change annotation",
+			event: controllers.Event{
+				Event: controllers.EventUpdate,
+				New: &k8sbeta.Gateway{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:        "update-1",
+						Namespace:   defaultNamespace.GetName(),
+						Labels:      map[string]string{"should": "see"},
+						Annotations: map[string]string{"should": "see-new"},
+					},
+					Spec: k8s.GatewaySpec{
+						GatewayClassName: k8s.ObjectName(features.GatewayAPIDefaultGatewayClass),
+					},
+					Status: k8s.GatewayStatus{
+						Listeners: []k8s.ListenerStatus{
+							{
+								AttachedRoutes: 100,
+							},
+						},
+					},
+				},
+				Old: &k8sbeta.Gateway{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:        "update-1",
+						Namespace:   defaultNamespace.GetName(),
+						Labels:      map[string]string{"should": "see"},
+						Annotations: map[string]string{"should": "see"},
+					},
+					Spec: k8s.GatewaySpec{
+						GatewayClassName: k8s.ObjectName(features.GatewayAPIDefaultGatewayClass),
+					},
+					Status: k8s.GatewayStatus{
+						Listeners: []k8s.ListenerStatus{
+							{
+								AttachedRoutes: 1,
+							},
+						},
+					},
+				},
+			},
+			reconciles: int32(1),
+			objects:    defaultObjects,
+		},
+		{
+			name: "update event change label",
+			event: controllers.Event{
+				Event: controllers.EventUpdate,
+				New: &k8sbeta.Gateway{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:        "update-2",
+						Namespace:   defaultNamespace.GetName(),
+						Labels:      map[string]string{"should": "see-new"},
+						Annotations: map[string]string{"should": "see"},
+					},
+					Spec: k8s.GatewaySpec{
+						GatewayClassName: k8s.ObjectName(features.GatewayAPIDefaultGatewayClass),
+					},
+					Status: k8s.GatewayStatus{
+						Listeners: []k8s.ListenerStatus{
+							{
+								AttachedRoutes: 100,
+							},
+						},
+					},
+				},
+				Old: &k8sbeta.Gateway{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:        "update-2",
+						Namespace:   defaultNamespace.GetName(),
+						Labels:      map[string]string{"should": "see"},
+						Annotations: map[string]string{"should": "see"},
+					},
+					Spec: k8s.GatewaySpec{
+						GatewayClassName: k8s.ObjectName(features.GatewayAPIDefaultGatewayClass),
+					},
+					Status: k8s.GatewayStatus{
+						Listeners: []k8s.ListenerStatus{
+							{
+								AttachedRoutes: 1,
+							},
+						},
+					},
+				},
+			},
+			reconciles: int32(1),
+			objects:    defaultObjects,
+		},
+		{
+			name: "update event change gateway spec",
+			event: controllers.Event{
+				Event: controllers.EventUpdate,
+				New: &k8sbeta.Gateway{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:        "update-3",
+						Namespace:   defaultNamespace.GetName(),
+						Labels:      map[string]string{"should": "see"},
+						Annotations: map[string]string{"should": "see"},
+						Generation:  1,
+					},
+					Spec: k8s.GatewaySpec{
+						GatewayClassName: k8s.ObjectName(features.GatewayAPIDefaultGatewayClass),
+					},
+					Status: k8s.GatewayStatus{
+						Listeners: []k8s.ListenerStatus{
+							{
+								AttachedRoutes: 100,
+							},
+						},
+					},
+				},
+				Old: &k8sbeta.Gateway{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:        "update-3",
+						Namespace:   defaultNamespace.GetName(),
+						Labels:      map[string]string{"should": "see"},
+						Annotations: map[string]string{"should": "see"},
+						Generation:  0,
+					},
+					Spec: k8s.GatewaySpec{
+						GatewayClassName: k8s.ObjectName(features.GatewayAPIDefaultGatewayClass),
+					},
+					Status: k8s.GatewayStatus{
+						Listeners: []k8s.ListenerStatus{
+							{
+								AttachedRoutes: 1,
+							},
+						},
+					},
+				},
+			},
+			reconciles: int32(1),
+			objects:    defaultObjects,
+		},
+		{
+			name: "update event no change gateway spec",
+			event: controllers.Event{
+				Event: controllers.EventUpdate,
+				New: &k8sbeta.Gateway{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:        "update-4",
+						Namespace:   defaultNamespace.GetName(),
+						Labels:      map[string]string{"should": "see"},
+						Annotations: map[string]string{"should": "see"},
+						Generation:  0,
+					},
+					Spec: k8s.GatewaySpec{
+						GatewayClassName: k8s.ObjectName(features.GatewayAPIDefaultGatewayClass),
+					},
+					Status: k8s.GatewayStatus{
+						Listeners: []k8s.ListenerStatus{
+							{
+								AttachedRoutes: 100,
+							},
+						},
+					},
+				},
+				Old: &k8sbeta.Gateway{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:        "update-4",
+						Namespace:   defaultNamespace.GetName(),
+						Labels:      map[string]string{"should": "see"},
+						Annotations: map[string]string{"should": "see"},
+						Generation:  0,
+					},
+					Spec: k8s.GatewaySpec{
+						GatewayClassName: k8s.ObjectName(features.GatewayAPIDefaultGatewayClass),
+					},
+					Status: k8s.GatewayStatus{
+						Listeners: []k8s.ListenerStatus{
+							{
+								AttachedRoutes: 1,
+							},
+						},
+					},
+				},
+			},
+			reconciles: int32(0),
+			objects:    defaultObjects,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reconciles := atomic.NewInt32(0)
+			reconcileDone := make(chan struct{}, 1) // Channel to signal reconciliation completion
+
+			dummyReconcile := func(types.NamespacedName) error {
+				reconciles.Inc()
+				// Signal that reconciliation is complete
+				select {
+				case reconcileDone <- struct{}{}:
+				default:
+				}
+				return nil
+			}
+
+			dummyWebHookInjectFn := func() inject.WebhookConfig {
+				return inject.WebhookConfig{}
+			}
+			stop := test.NewStop(t)
+
+			// Don't include the old object in initial objects - we'll create it during the test
+			client := kube.NewFakeClient(tt.objects...)
+			kube.SetObjectFilter(client, discoveryNamespaceFilter)
+			client.Kube().Discovery().(*fakediscovery.FakeDiscovery).FakedServerVersion = &kubeVersion.Info{Major: "1", Minor: "28"}
+
+			tw := revisions.NewTagWatcher(client, "", "istio-system")
+			env := newTestEnv()
+			go tw.Run(stop)
+
+			d := NewDeploymentController(client, cluster.ID(features.ClusterName), env, dummyWebHookInjectFn, func(fn func()) {
+			}, tw, "", "")
+			d.queue.ShutDownEarly()
+			client.RunAndWait(stop)
+			d.queue = controllers.NewQueue("fake gateway queue",
+				controllers.WithReconciler(dummyReconcile))
+			go d.queue.Run(stop)
+			kube.WaitForCacheSync("test", stop, d.queue.HasSynced, d.gateways.HasSynced, tw.HasSynced)
+
+			switch tt.event.Event {
+			case controllers.EventAdd:
+				gw := tt.event.New.(*k8sbeta.Gateway)
+				kclient.NewWriteClient[*k8sbeta.Gateway](client).Create(gw.DeepCopy())
+			case controllers.EventDelete:
+				// For delete events, first create the gateway, then delete it
+				gw := tt.event.Old.(*k8sbeta.Gateway)
+				kclient.NewWriteClient[*k8sbeta.Gateway](client).Create(gw.DeepCopy())
+				kube.WaitForCacheSync("test", stop, d.queue.HasSynced)
+				// Wait for the create event reconciliation to complete
+				<-reconcileDone
+				// Reset counter after create, so we only count the delete event
+				reconciles.Store(0)
+				kclient.NewWriteClient[*k8sbeta.Gateway](client).Delete(gw.Name, gw.Namespace)
+			case controllers.EventUpdate:
+				// For update events, first create the old gateway, then update it
+				newGw := tt.event.New.(*k8sbeta.Gateway)
+				oldGw := tt.event.Old.(*k8sbeta.Gateway)
+				kclient.NewWriteClient[*k8sbeta.Gateway](client).Create(oldGw.DeepCopy())
+				kube.WaitForCacheSync("test", stop, d.queue.HasSynced)
+				// Wait for the create event reconciliation to complete
+				<-reconcileDone
+				// Reset counter after create, so we only count the update event
+				reconciles.Store(0)
+				kclient.NewWriteClient[*k8sbeta.Gateway](client).Update(newGw.DeepCopy())
+			}
+			kube.WaitForCacheSync("test", stop, d.queue.HasSynced)
+
+			assert.EventuallyEqual(t, reconciles.Load, tt.reconciles, retry.Timeout(time.Second*5), retry.Message("reconciliations count check"))
+		})
+	}
 }
 
 func testInjectionConfig(t test.Failer, values string) func() inject.WebhookConfig {
@@ -702,11 +1149,22 @@ global:
 	return injConfig
 }
 
-func buildPatch(version int) string {
+// buildPatch used to accept a version
+// but lint flagged that ControllerVersion
+// was always used so the function has been
+// adjusted to hardcode ControllerVersion
+func buildPatch() string {
 	return fmt.Sprintf(`apiVersion: gateway.networking.k8s.io/v1beta1
 kind: Gateway
 metadata:
   annotations:
     gateway.istio.io/controller-version: "%d"
-`, version)
+`, ControllerVersion)
+}
+
+func newTestEnv() *model.Environment {
+	env := model.NewEnvironment()
+	env.Watcher = meshwatcher.NewTestWatcher(mesh.DefaultMeshConfig())
+
+	return env
 }

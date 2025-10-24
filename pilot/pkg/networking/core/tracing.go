@@ -63,7 +63,7 @@ func configureTracing(
 	svc *model.Service,
 ) *requestidextension.UUIDRequestIDExtensionContext {
 	tracingCfg := push.Telemetry.Tracing(proxy, svc)
-	return configureTracingFromTelemetry(tracingCfg, push, proxy, httpConnMgr, class)
+	return configureTracingFromTelemetry(tracingCfg, push, proxy, httpConnMgr, class, svc)
 }
 
 func configureTracingFromTelemetry(
@@ -72,6 +72,7 @@ func configureTracingFromTelemetry(
 	proxy *model.Proxy,
 	h *hcm.HttpConnectionManager,
 	class networking.ListenerClass,
+	svc *model.Service,
 ) *requestidextension.UUIDRequestIDExtensionContext {
 	proxyCfg := proxy.Metadata.ProxyConfigOrDefault(push.Mesh.DefaultConfig)
 	// If there is no telemetry config defined, fallback to legacy mesh config.
@@ -101,7 +102,7 @@ func configureTracingFromTelemetry(
 
 	var useCustomSampler bool
 	if spec.Provider != nil {
-		hcmTracing, hasCustomSampler, err := configureFromProviderConfig(push, proxy, spec.Provider)
+		hcmTracing, hasCustomSampler, err := configureFromProviderConfig(push, proxy, spec.Provider, svc)
 		if err != nil {
 			log.Warnf("Not able to configure requested tracing provider %q: %v", spec.Provider.Name, err)
 			return nil
@@ -146,10 +147,10 @@ func configureTracingFromTelemetry(
 // configureFromProviderConfigHandled contains the number of providers we handle below.
 // This is to ensure this stays in sync as new handlers are added
 // STOP. DO NOT UPDATE THIS WITHOUT UPDATING configureFromProviderConfig.
-const configureFromProviderConfigHandled = 14
+const configureFromProviderConfigHandled = 15
 
 func configureFromProviderConfig(pushCtx *model.PushContext, proxy *model.Proxy,
-	providerCfg *meshconfig.MeshConfig_ExtensionProvider,
+	providerCfg *meshconfig.MeshConfig_ExtensionProvider, svc *model.Service,
 ) (*hcm.HttpConnectionManager_Tracing, bool, error) {
 	startChildSpan := false
 	if proxy.Type == model.Router {
@@ -160,7 +161,9 @@ func configureFromProviderConfig(pushCtx *model.PushContext, proxy *model.Proxy,
 	var maxTagLength uint32
 	var providerConfig typedConfigGenFn
 	var providerName string
-	if proxy.XdsNode != nil {
+	if svc != nil {
+		serviceCluster = svc.Hostname.String()
+	} else if proxy.XdsNode != nil {
 		serviceCluster = proxy.XdsNode.Cluster
 	}
 	switch provider := providerCfg.Provider.(type) {
@@ -173,7 +176,8 @@ func configureFromProviderConfig(pushCtx *model.PushContext, proxy *model.Proxy,
 				model.IncLookupClusterFailures("zipkin")
 				return nil, fmt.Errorf("could not find cluster for tracing provider %q: %v", provider, err)
 			}
-			return zipkinConfig(hostname, cluster, provider.Zipkin.GetPath(), !provider.Zipkin.GetEnable_64BitTraceId())
+			traceContextOption := convertTraceContextOption(provider.Zipkin.GetTraceContextOption())
+			return zipkinConfig(hostname, cluster, provider.Zipkin.GetPath(), !provider.Zipkin.GetEnable_64BitTraceId(), traceContextOption, proxy)
 		}
 	case *meshconfig.MeshConfig_ExtensionProvider_Datadog:
 		maxTagLength = provider.Datadog.GetMaxTagLength()
@@ -217,6 +221,7 @@ func configureFromProviderConfig(pushCtx *model.PushContext, proxy *model.Proxy,
 		*meshconfig.MeshConfig_ExtensionProvider_EnvoyTcpAls,
 		*meshconfig.MeshConfig_ExtensionProvider_EnvoyOtelAls,
 		*meshconfig.MeshConfig_ExtensionProvider_EnvoyFileAccessLog,
+		*meshconfig.MeshConfig_ExtensionProvider_Sds,
 		*meshconfig.MeshConfig_ExtensionProvider_Prometheus:
 		return nil, false, fmt.Errorf("provider %T does not support tracing", provider)
 		// Should never happen, but just in case we forget to add one
@@ -227,7 +232,23 @@ func configureFromProviderConfig(pushCtx *model.PushContext, proxy *model.Proxy,
 	return hcmTracing, useCustomSampler, err
 }
 
-func zipkinConfig(hostname, cluster, endpoint string, enable128BitTraceID bool) (*anypb.Any, error) {
+// convertTraceContextOption converts meshconfig ZipkinTraceContextOption to Envoy ZipkinConfig_TraceContextOption
+func convertTraceContextOption(
+	option meshconfig.MeshConfig_ExtensionProvider_ZipkinTracingProvider_TraceContextOption,
+) tracingcfg.ZipkinConfig_TraceContextOption {
+	switch option {
+	case meshconfig.MeshConfig_ExtensionProvider_ZipkinTracingProvider_USE_B3_WITH_W3C_PROPAGATION:
+		return tracingcfg.ZipkinConfig_USE_B3_WITH_W3C_PROPAGATION
+	default:
+		// Default to USE_B3 for backward compatibility
+		return tracingcfg.ZipkinConfig_USE_B3
+	}
+}
+
+func zipkinConfig(
+	hostname, cluster, endpoint string, enable128BitTraceID bool, traceContextOption tracingcfg.ZipkinConfig_TraceContextOption,
+	proxy *model.Proxy,
+) (*anypb.Any, error) {
 	if endpoint == "" {
 		endpoint = "/api/v2/spans" // envoy deprecated v1 support
 	}
@@ -239,6 +260,17 @@ func zipkinConfig(hostname, cluster, endpoint string, enable128BitTraceID bool) 
 		TraceId_128Bit:           enable128BitTraceID,               // istio default enable 128 bit trace id
 		SharedSpanContext:        wrapperspb.Bool(false),
 	}
+
+	// Only set TraceContextOption for proxies that support it to avoid NACK from older proxies
+	// TraceContextOption support requires a recent Envoy version - using conservative version gating
+	if proxy.IstioVersion != nil && proxy.VersionGreaterOrEqual(&model.IstioVersion{Major: 1, Minor: 28}) {
+		zc.TraceContextOption = traceContextOption
+	} else {
+		// Log when TraceContextOption configuration is ignored due to version gating
+		log.Debugf("Proxy %s (version %v) does not support TraceContextOption: requires Istio 1.28+",
+			proxy.ID, proxy.IstioVersion)
+	}
+
 	return protoconv.MessageToAnyWithError(zc)
 }
 

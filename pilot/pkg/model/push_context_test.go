@@ -17,7 +17,6 @@ package model
 import (
 	"fmt"
 	"reflect"
-	"regexp"
 	"sort"
 	"sync"
 	"testing"
@@ -51,6 +50,7 @@ import (
 	"istio.io/istio/pkg/config/schema/kind"
 	"istio.io/istio/pkg/config/visibility"
 	"istio.io/istio/pkg/maps"
+	"istio.io/istio/pkg/model"
 	"istio.io/istio/pkg/slices"
 	"istio.io/istio/pkg/test"
 	"istio.io/istio/pkg/test/util/assert"
@@ -161,40 +161,132 @@ func TestConcurrentMerge(t *testing.T) {
 }
 
 func TestEnvoyFilters(t *testing.T) {
-	proxyVersionRegex := regexp.MustCompile(`1\.4.*`)
 	envoyFilters := []*EnvoyFilterWrapper{
-		{
-			Name:             "ef1",
-			workloadSelector: map[string]string{"app": "v1"},
-			Patches: map[networking.EnvoyFilter_ApplyTo][]*EnvoyFilterConfigPatchWrapper{
-				networking.EnvoyFilter_LISTENER: {
+		convertToEnvoyFilterWrapper(&config.Config{
+			Meta: config.Meta{
+				Name:      "ef1",
+				Namespace: "test-ns",
+			},
+			Spec: &networking.EnvoyFilter{
+				WorkloadSelector: &networking.WorkloadSelector{
+					Labels: map[string]string{"app": "v1"},
+				},
+				ConfigPatches: []*networking.EnvoyFilter_EnvoyConfigObjectPatch{
 					{
+						ApplyTo: networking.EnvoyFilter_LISTENER,
 						Match: &networking.EnvoyFilter_EnvoyConfigObjectMatch{
 							Proxy: &networking.EnvoyFilter_ProxyMatch{
 								ProxyVersion: "1\\.4.*",
 							},
 						},
-						ProxyVersionRegex: proxyVersionRegex,
+						// we don't care about the patch content in this test, but it must be non-nil
+						Patch: &networking.EnvoyFilter_Patch{},
 					},
 				},
 			},
-		},
-		{
-			Name:             "ef2",
-			workloadSelector: map[string]string{"app": "v1"},
-			Patches: map[networking.EnvoyFilter_ApplyTo][]*EnvoyFilterConfigPatchWrapper{
-				networking.EnvoyFilter_CLUSTER: {
+		}),
+		convertToEnvoyFilterWrapper(&config.Config{
+			Meta: config.Meta{
+				Name:      "ef2",
+				Namespace: "test-ns",
+			},
+			Spec: &networking.EnvoyFilter{
+				WorkloadSelector: &networking.WorkloadSelector{
+					Labels: map[string]string{"app": "v1"},
+				},
+				ConfigPatches: []*networking.EnvoyFilter_EnvoyConfigObjectPatch{
 					{
+						ApplyTo: networking.EnvoyFilter_CLUSTER,
 						Match: &networking.EnvoyFilter_EnvoyConfigObjectMatch{
 							Proxy: &networking.EnvoyFilter_ProxyMatch{
-								ProxyVersion: `1\\.4.*`,
+								ProxyVersion: "1\\.4.*",
 							},
 						},
-						ProxyVersionRegex: proxyVersionRegex,
+						// we don't care about the patch content in this test, but it must be non-nil
+						Patch: &networking.EnvoyFilter_Patch{},
 					},
 				},
 			},
-		},
+		}),
+		convertToEnvoyFilterWrapper(&config.Config{
+			Meta: config.Meta{
+				Name:      "ef-with-target-ref",
+				Namespace: "test-ns",
+			},
+			Spec: &networking.EnvoyFilter{
+				TargetRefs: []*selectorpb.PolicyTargetReference{
+					{
+						Group: "gateway.networking.k8s.io",
+						Kind:  "Gateway",
+						Name:  "gateway-1",
+					},
+				},
+				ConfigPatches: []*networking.EnvoyFilter_EnvoyConfigObjectPatch{
+					{
+						ApplyTo: networking.EnvoyFilter_CLUSTER,
+						Match: &networking.EnvoyFilter_EnvoyConfigObjectMatch{
+							Proxy: &networking.EnvoyFilter_ProxyMatch{
+								ProxyVersion: "1\\.4.*",
+							},
+						},
+						// we don't care about the patch content in this test, but it must be non-nil
+						Patch: &networking.EnvoyFilter_Patch{},
+					},
+				},
+			},
+		}),
+		convertToEnvoyFilterWrapper(&config.Config{
+			Meta: config.Meta{
+				Name:      "ef-for-waypoint",
+				Namespace: "test-ns",
+			},
+			Spec: &networking.EnvoyFilter{
+				TargetRefs: []*selectorpb.PolicyTargetReference{
+					{
+						Group: "gateway.networking.k8s.io",
+						Kind:  "Gateway",
+						Name:  "waypoint",
+					},
+				},
+				ConfigPatches: []*networking.EnvoyFilter_EnvoyConfigObjectPatch{
+					{
+						ApplyTo: networking.EnvoyFilter_CLUSTER,
+						// we don't care about the patch content in this test, but it must be non-nil
+						Patch: &networking.EnvoyFilter_Patch{},
+					},
+				},
+			},
+		}),
+	}
+
+	rootEnvoyFilters := []*EnvoyFilterWrapper{
+		convertToEnvoyFilterWrapper(&config.Config{
+			Meta: config.Meta{
+				Name:      "ef-gatewayclass-root",
+				Namespace: "istio-system",
+			},
+			Spec: &networking.EnvoyFilter{
+				TargetRefs: []*selectorpb.PolicyTargetReference{
+					{
+						Group: "gateway.networking.k8s.io",
+						Kind:  "GatewayClass",
+						Name:  "istio-waypoint",
+					},
+				},
+				ConfigPatches: []*networking.EnvoyFilter_EnvoyConfigObjectPatch{
+					{
+						ApplyTo: networking.EnvoyFilter_HTTP_FILTER,
+						Match: &networking.EnvoyFilter_EnvoyConfigObjectMatch{
+							Proxy: &networking.EnvoyFilter_ProxyMatch{
+								ProxyVersion: "1\\.4.*",
+							},
+						},
+						// we don't care about the patch content in this test, but it must be non-nil
+						Patch: &networking.EnvoyFilter_Patch{},
+					},
+				},
+			},
+		}),
 	}
 
 	push := &PushContext{
@@ -202,7 +294,7 @@ func TestEnvoyFilters(t *testing.T) {
 			RootNamespace: "istio-system",
 		},
 		envoyFiltersByNamespace: map[string][]*EnvoyFilterWrapper{
-			"istio-system": envoyFilters,
+			"istio-system": append(envoyFilters, rootEnvoyFilters...),
 			"test-ns":      envoyFilters,
 		},
 	}
@@ -215,10 +307,11 @@ func TestEnvoyFilters(t *testing.T) {
 	}
 
 	cases := []struct {
-		name                    string
-		proxy                   *Proxy
-		expectedListenerPatches int
-		expectedClusterPatches  int
+		name                      string
+		proxy                     *Proxy
+		expectedListenerPatches   int
+		expectedClusterPatches    int
+		expectedHTTPFilterPatches int
 	}{
 		{
 			name: "proxy matches two envoyfilters",
@@ -227,8 +320,9 @@ func TestEnvoyFilters(t *testing.T) {
 				Metadata:        &NodeMetadata{IstioVersion: "1.4.0", Labels: map[string]string{"app": "v1"}},
 				ConfigNamespace: "test-ns",
 			},
-			expectedListenerPatches: 2,
-			expectedClusterPatches:  2,
+			expectedListenerPatches:   2,
+			expectedClusterPatches:    2,
+			expectedHTTPFilterPatches: 0,
 		},
 		{
 			name: "proxy in root namespace matches an envoyfilter",
@@ -237,10 +331,10 @@ func TestEnvoyFilters(t *testing.T) {
 				Metadata:        &NodeMetadata{IstioVersion: "1.4.0", Labels: map[string]string{"app": "v1"}},
 				ConfigNamespace: "istio-system",
 			},
-			expectedListenerPatches: 1,
-			expectedClusterPatches:  1,
+			expectedListenerPatches:   1,
+			expectedClusterPatches:    1,
+			expectedHTTPFilterPatches: 0,
 		},
-
 		{
 			name: "proxy matches no envoyfilter",
 			proxy: &Proxy{
@@ -248,8 +342,9 @@ func TestEnvoyFilters(t *testing.T) {
 				Metadata:        &NodeMetadata{IstioVersion: "1.4.0", Labels: map[string]string{"app": "v2"}},
 				ConfigNamespace: "test-ns",
 			},
-			expectedListenerPatches: 0,
-			expectedClusterPatches:  0,
+			expectedListenerPatches:   0,
+			expectedClusterPatches:    0,
+			expectedHTTPFilterPatches: 0,
 		},
 		{
 			name: "proxy matches envoyfilter in root ns",
@@ -258,8 +353,9 @@ func TestEnvoyFilters(t *testing.T) {
 				Metadata:        &NodeMetadata{IstioVersion: "1.4.0", Labels: map[string]string{"app": "v1"}},
 				ConfigNamespace: "test-n2",
 			},
-			expectedListenerPatches: 1,
-			expectedClusterPatches:  1,
+			expectedListenerPatches:   1,
+			expectedClusterPatches:    1,
+			expectedHTTPFilterPatches: 0,
 		},
 		{
 			name: "proxy version matches no envoyfilters",
@@ -268,8 +364,44 @@ func TestEnvoyFilters(t *testing.T) {
 				Metadata:        &NodeMetadata{IstioVersion: "1.3.0", Labels: map[string]string{"app": "v1"}},
 				ConfigNamespace: "test-ns",
 			},
-			expectedListenerPatches: 0,
-			expectedClusterPatches:  0,
+			expectedListenerPatches:   0,
+			expectedClusterPatches:    0,
+			expectedHTTPFilterPatches: 0,
+		},
+		{
+			name: "proxy matched target ref",
+			proxy: &Proxy{
+				Labels:          map[string]string{"gateway.networking.k8s.io/gateway-name": "gateway-1"},
+				Metadata:        &NodeMetadata{IstioVersion: "1.4.0", Labels: map[string]string{"app": "v1"}},
+				ConfigNamespace: "test-ns",
+			},
+			expectedListenerPatches:   0,
+			expectedClusterPatches:    2,
+			expectedHTTPFilterPatches: 0,
+		},
+		{
+			name: "waypoint matched",
+			proxy: &Proxy{
+				Type:            model.Waypoint,
+				Labels:          map[string]string{"gateway.networking.k8s.io/gateway-name": "waypoint"},
+				Metadata:        &NodeMetadata{IstioVersion: "1.4.0", Labels: map[string]string{"app": "v1"}},
+				ConfigNamespace: "test-ns",
+			},
+			expectedListenerPatches:   0,
+			expectedClusterPatches:    2,
+			expectedHTTPFilterPatches: 1,
+		},
+		{
+			name: "waypoint matched gatewayclass in root namespace",
+			proxy: &Proxy{
+				Type:            model.Waypoint,
+				Labels:          map[string]string{"gateway.networking.k8s.io/gateway-name": "istio-waypoint"},
+				Metadata:        &NodeMetadata{IstioVersion: "1.4.0"},
+				ConfigNamespace: "test-ns",
+			},
+			expectedListenerPatches:   0,
+			expectedClusterPatches:    0,
+			expectedHTTPFilterPatches: 1,
 		},
 	}
 
@@ -277,7 +409,7 @@ func TestEnvoyFilters(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			filter := push.EnvoyFilters(tt.proxy)
 			if filter == nil {
-				if tt.expectedClusterPatches != 0 || tt.expectedListenerPatches != 0 {
+				if tt.expectedClusterPatches != 0 || tt.expectedListenerPatches != 0 || tt.expectedHTTPFilterPatches != 0 {
 					t.Errorf("Got no envoy filter")
 				}
 				return
@@ -287,6 +419,9 @@ func TestEnvoyFilters(t *testing.T) {
 			}
 			if len(filter.Patches[networking.EnvoyFilter_LISTENER]) != tt.expectedListenerPatches {
 				t.Errorf("Expect %d envoy filter listener patches, but got %d", tt.expectedListenerPatches, len(filter.Patches[networking.EnvoyFilter_LISTENER]))
+			}
+			if len(filter.Patches[networking.EnvoyFilter_HTTP_FILTER]) != tt.expectedHTTPFilterPatches {
+				t.Errorf("Expect %d envoy filter http filter patches, but got %d", tt.expectedHTTPFilterPatches, len(filter.Patches[networking.EnvoyFilter_HTTP_FILTER]))
 			}
 		})
 	}
@@ -1626,6 +1761,12 @@ func TestInitPushContext(t *testing.T) {
 	old := NewPushContext()
 	old.InitContext(env, nil, nil)
 
+	for _, sidecars := range old.sidecarIndex.sidecarsByNamespace {
+		for _, sidecar := range sidecars {
+			sidecar.initFunc()
+		}
+	}
+
 	// Create a new one, copying from the old one
 	// Pass a ConfigsUpdated otherwise we would just copy it directly
 	newPush := NewPushContext()
@@ -1634,6 +1775,12 @@ func TestInitPushContext(t *testing.T) {
 			{Kind: kind.Secret}: {},
 		},
 	})
+
+	for _, sidecars := range newPush.sidecarIndex.sidecarsByNamespace {
+		for _, sidecar := range sidecars {
+			sidecar.initFunc()
+		}
+	}
 
 	// Check to ensure the update is identical to the old one
 	// There is probably a better way to do this.
@@ -1644,7 +1791,7 @@ func TestInitPushContext(t *testing.T) {
 			AuthenticationPolicies{}, NetworkManager{}, sidecarIndex{}, Telemetries{}, ProxyConfigs{}, ConsolidatedDestRule{},
 			ClusterLocalHosts{}),
 		// These are not feasible/worth comparing
-		cmpopts.IgnoreTypes(sync.RWMutex{}, localServiceDiscovery{}, FakeStore{}, atomic.Bool{}, sync.Mutex{}),
+		cmpopts.IgnoreTypes(sync.RWMutex{}, localServiceDiscovery{}, FakeStore{}, atomic.Bool{}, sync.Mutex{}, func() {}),
 		cmpopts.IgnoreUnexported(IstioEndpoint{}),
 		cmpopts.IgnoreInterfaces(struct{ mesh.Holder }{}),
 		protocmp.Transform(),
@@ -3174,7 +3321,7 @@ func TestInstancesByPort(t *testing.T) {
 		svc5_1.Hostname.String(): {
 			svc5_1.Attributes.Namespace: {
 				Shards: map[ShardKey][]*IstioEndpoint{
-					{Cluster: "Kubernets", Provider: provider.External}: {
+					{Cluster: "Kubernetes", Provider: provider.External}: {
 						&IstioEndpoint{
 							Addresses:       []string{"1.1.1.1"},
 							EndpointPort:    7000,
