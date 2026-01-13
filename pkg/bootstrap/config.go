@@ -26,6 +26,7 @@ import (
 	"time"
 
 	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 
 	"istio.io/api/annotation"
@@ -343,7 +344,8 @@ func getStatsOptions(meta *model.BootstrapNodeMetadata) []option.Instance {
 		} else if statsEvictionInterval%statsFlushInterval != 0 {
 			log.Warnf("StatsEvictionInterval must be a multiple of the StatsFlushInterval")
 		} else {
-			options = append(options, option.EnvoyStatsEvictionInterval(statsEvictionInterval))
+			duration := &durationpb.Duration{Seconds: int64(statsEvictionInterval.Seconds())}
+			options = append(options, option.EnvoyStatsEvictionInterval(duration))
 		}
 	}
 
@@ -731,12 +733,13 @@ func GetNodeMetaData(options MetadataOptions) (*model.Node, error) {
 	}
 
 	var l *core.Locality
-	if meta.Labels[model.LocalityLabel] == "" && options.Platform != nil {
+	localityLabel := model.GetLocalityLabel(meta.Labels)
+	if localityLabel == "" && options.Platform != nil {
 		// The locality string was not set, try to get locality from platform
 		l = options.Platform.Locality()
 	} else {
 		// replace "." with "/"
-		localityString := model.GetLocalityLabel(meta.Labels[model.LocalityLabel])
+		localityString := model.SanitizeLocalityLabel(localityLabel)
 		if localityString != "" {
 			// override the label with the sanitized value
 			meta.Labels[model.LocalityLabel] = localityString

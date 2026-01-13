@@ -37,18 +37,22 @@ import (
 	"istio.io/istio/pkg/cluster"
 	"istio.io/istio/pkg/config"
 	"istio.io/istio/pkg/config/host"
+	"istio.io/istio/pkg/config/protocol"
 	"istio.io/istio/pkg/config/schema/gvk"
+	"istio.io/istio/pkg/config/schema/kind"
 	"istio.io/istio/pkg/config/schema/kubetypes"
 	"istio.io/istio/pkg/kube/controllers"
 	"istio.io/istio/pkg/kube/krt"
 	"istio.io/istio/pkg/log"
+	"istio.io/istio/pkg/maps"
 	"istio.io/istio/pkg/network"
 	"istio.io/istio/pkg/ptr"
 	"istio.io/istio/pkg/slices"
+	"istio.io/istio/pkg/util/protomarshal"
 	"istio.io/istio/pkg/workloadapi"
 )
 
-func (a *index) ServicesCollection(
+func (a Builder) ServicesCollection(
 	clusterID cluster.ID,
 	services krt.Collection[*v1.Service],
 	serviceEntries krt.Collection[*networkingclient.ServiceEntry],
@@ -65,6 +69,7 @@ func (a *index) ServicesCollection(
 				multicluster.ClusterKRTMetadataKey: clusterID,
 			}),
 		)...)
+
 	ServiceEntriesInfo := krt.NewManyCollection(serviceEntries, a.serviceEntryServiceBuilder(waypoints, namespaces),
 		append(
 			opts.WithName("ServiceEntriesInfo"),
@@ -72,13 +77,69 @@ func (a *index) ServicesCollection(
 				multicluster.ClusterKRTMetadataKey: clusterID,
 			}),
 		)...)
-	WorkloadServices := krt.JoinCollection(
-		[]krt.Collection[model.ServiceInfo]{ServicesInfo, ServiceEntriesInfo},
-		append(opts.WithName("WorkloadService"), krt.WithMetadata(
-			krt.Metadata{
+
+	allTypedServiceInfos := krt.JoinCollection([]krt.Collection[TypedServiceInfo]{ServicesInfo, ServiceEntriesInfo},
+		append(opts.WithName("AllTypedServiceInfo"), krt.WithMetadata(krt.Metadata{
+			multicluster.ClusterKRTMetadataKey: clusterID,
+		}))...)
+
+	allTypedServiceInfosByHostname := krt.NewIndex(allTypedServiceInfos, "TypedServiceInfosByHostname", func(ts TypedServiceInfo) []string {
+		return []string{ts.Service.Hostname}
+	})
+
+	WorkloadServices := krt.NewManyCollection(
+		allTypedServiceInfosByHostname.AsCollection(),
+		func(ctx krt.HandlerContext, ios krt.IndexObject[string, TypedServiceInfo]) []model.ServiceInfo {
+			if len(ios.Objects) == 0 {
+				return nil
+			}
+
+			typedServiceInfos := ios.Objects
+
+			bestByNamespace := make(map[string]model.ServiceInfo)
+
+			// check if a is a better ServiceInfo than b
+			// better meaning both:
+			//     a is older than b
+			//     b is not a Kubernetes Service
+			isBetter := func(a, b model.ServiceInfo) bool {
+				return a.CreationTime.Before(b.CreationTime) && b.Source.Kind != kind.Service
+			}
+			var canonical *model.ServiceInfo
+			for _, tsi := range typedServiceInfos {
+				tsiNamespace := tsi.GetNamespace()
+				if tsi.Source.Kind == kind.Service {
+					// A Kubernetes Service is always used, and canonical
+					bestByNamespace[tsiNamespace] = tsi.ServiceInfo
+					canonical = &tsi.ServiceInfo
+					continue
+				}
+				currentBest, found := bestByNamespace[tsiNamespace]
+				if !found || isBetter(tsi.ServiceInfo, currentBest) {
+					bestByNamespace[tsiNamespace] = tsi.ServiceInfo
+				} else {
+					// if we are not the best for our namespace, then we don't need to worry about being canonical
+					continue
+				}
+				if canonical == nil || isBetter(tsi.ServiceInfo, *canonical) {
+					canonical = &tsi.ServiceInfo
+				}
+			}
+
+			// make a copy and then set canonical
+			if canonical != nil {
+				bestByNamespace[canonical.GetNamespace()] = setCanonical(canonical)
+			}
+
+			// convert map into slice and return
+			return maps.Values(bestByNamespace)
+		}, append(
+			opts.WithName("WorkloadServices"),
+			krt.WithMetadata(krt.Metadata{
 				multicluster.ClusterKRTMetadataKey: clusterID,
-			},
-		))...)
+			}),
+		)...,
+	)
 	return WorkloadServices
 }
 
@@ -95,7 +156,7 @@ func GlobalMergedWorkloadServicesCollection(
 	globalNamespaces krt.Collection[krt.Collection[*v1.Namespace]],
 	namespacesByCluster krt.Index[cluster.ID, krt.Collection[*v1.Namespace]],
 	meshConfig krt.Singleton[MeshConfig],
-	globalNetworks networkCollections,
+	globalNetworks NetworkCollections,
 	domainSuffix string,
 	opts krt.OptionsBuilder,
 ) krt.Collection[krt.Collection[krt.ObjectWithCluster[model.ServiceInfo]]] {
@@ -227,12 +288,39 @@ func serviceServiceBuilder(
 			Source:        MakeSource(s),
 			Waypoint:      waypointStatus,
 			Scope:         serviceScope,
+			CreationTime:  s.CreationTimestamp.Time,
 		}
 		if precompute {
 			return precomputeServicePtr(svcInfo)
 		}
 
 		return svcInfo
+	}
+}
+
+func typedServiceServiceBuilder(
+	waypoints krt.Collection[Waypoint],
+	namespaces krt.Collection[*v1.Namespace],
+	meshConfig krt.Singleton[MeshConfig],
+	domainSuffix string,
+	localCluster bool,
+	checkServiceScope bool,
+	networkGetter func(ctx krt.HandlerContext) network.ID,
+	precompute bool,
+) krt.TransformationSingle[*v1.Service, TypedServiceInfo] {
+	return func(ctx krt.HandlerContext, s *v1.Service) *TypedServiceInfo {
+		svcInfo := serviceServiceBuilder(waypoints,
+			namespaces,
+			meshConfig,
+			domainSuffix,
+			localCluster,
+			checkServiceScope,
+			networkGetter,
+			precompute)(ctx, s)
+		if svcInfo == nil {
+			return nil
+		}
+		return &TypedServiceInfo{ServiceInfo: *svcInfo}
 	}
 }
 
@@ -324,13 +412,13 @@ func matchServiceScope(ctx krt.HandlerContext, meshCfg *MeshConfig, namespaces k
 	return model.Local
 }
 
-func (a *index) serviceServiceBuilder(
+func (a Builder) serviceServiceBuilder(
 	waypoints krt.Collection[Waypoint],
 	namespaces krt.Collection[*v1.Namespace],
 	meshConfig krt.Singleton[MeshConfig],
 	precompute bool,
-) krt.TransformationSingle[*v1.Service, model.ServiceInfo] {
-	return serviceServiceBuilder(
+) krt.TransformationSingle[*v1.Service, TypedServiceInfo] {
+	return typedServiceServiceBuilder(
 		waypoints,
 		namespaces,
 		meshConfig,
@@ -352,14 +440,30 @@ func MakeSource(o controllers.Object) model.TypedObject {
 	}
 }
 
-func (a *index) serviceEntryServiceBuilder(
+// TypedServiceInfo is a wrapper around ServiceInfo to avoid key conflicts during processing
+type TypedServiceInfo struct {
+	model.ServiceInfo
+}
+
+func (t TypedServiceInfo) ResourceName() string {
+	return t.Source.Kind.String() + "/" + t.GetNamespace() + "/" + t.GetName() + "/" + t.Service.GetHostname()
+}
+
+func (t TypedServiceInfo) Equals(other TypedServiceInfo) bool {
+	return t.ServiceInfo.Equals(other.ServiceInfo)
+}
+
+func (a Builder) serviceEntryServiceBuilder(
 	waypoints krt.Collection[Waypoint],
 	namespaces krt.Collection[*v1.Namespace],
-) krt.TransformationMulti[*networkingclient.ServiceEntry, model.ServiceInfo] {
-	return func(ctx krt.HandlerContext, s *networkingclient.ServiceEntry) []model.ServiceInfo {
+) krt.TransformationMulti[*networkingclient.ServiceEntry, TypedServiceInfo] {
+	return func(ctx krt.HandlerContext, s *networkingclient.ServiceEntry) []TypedServiceInfo {
 		waypoint, waypointError := fetchWaypointForService(ctx, waypoints, namespaces, s.ObjectMeta)
-		return serviceEntriesInfo(ctx, s, waypoint, waypointError, func(ctx krt.HandlerContext) network.ID {
+		serviceInfos := serviceEntriesInfo(ctx, s, waypoint, waypointError, func(ctx krt.HandlerContext) network.ID {
 			return a.Network(ctx)
+		})
+		return slices.Map(serviceInfos, func(si model.ServiceInfo) TypedServiceInfo {
+			return TypedServiceInfo{ServiceInfo: si}
 		})
 	}
 }
@@ -396,6 +500,7 @@ func serviceEntriesInfo(
 		log.Warnf("ServiceEntry %s/%s has dynamic DNS resolution but no valid waypoint", s.Namespace, s.Name)
 	}
 
+	// Should we actually precomupute here, or should we deduplicate first?
 	return slices.Map(constructServiceEntries(ctx, s, w, networkGetter), func(e *workloadapi.Service) model.ServiceInfo {
 		return precomputeService(model.ServiceInfo{
 			Service:       e,
@@ -403,6 +508,7 @@ func serviceEntriesInfo(
 			LabelSelector: sel,
 			Source:        MakeSource(s),
 			Waypoint:      waypoint,
+			CreationTime:  s.CreationTimestamp.Time,
 		})
 	})
 }
@@ -426,14 +532,19 @@ func constructServiceEntries(
 		autoassignedHostAddresses = serviceentry.GetHostAddressesFromServiceEntry(svc)
 	}
 	ports := make([]*workloadapi.Port, 0, len(svc.Spec.Ports))
+	containsTLSPort := false
 	for _, p := range svc.Spec.Ports {
 		target := p.TargetPort
 		if target == 0 {
 			target = p.Number
 		}
+		if p.Protocol == string(protocol.TLS) {
+			containsTLSPort = true
+		}
 		ports = append(ports, &workloadapi.Port{
 			ServicePort: p.Number,
 			TargetPort:  target,
+			AppProtocol: toAppProtocolFromProtocol(protocol.Parse(p.Protocol)),
 		})
 	}
 
@@ -474,6 +585,11 @@ func constructServiceEntries(
 				})
 			}
 		}
+		if host.Name(h).IsWildCarded() && containsTLSPort && svc.Spec.Resolution == v1alpha3.ServiceEntry_DYNAMIC_DNS &&
+			!features.EnableWildcardHostServiceEntriesForTLS {
+			log.Debugf("xds configuration will not be generated for the TLS port belonging to the service %s with wildcard "+
+				"host %s since the feature is disabled", svc.Name, h)
+		}
 		res = append(res, &workloadapi.Service{
 			Name:            svc.Name,
 			Namespace:       svc.Namespace,
@@ -501,6 +617,7 @@ func constructService(
 		ports = append(ports, &workloadapi.Port{
 			ServicePort: uint32(p.Port),
 			TargetPort:  uint32(p.TargetPort.IntVal),
+			AppProtocol: toAppProtocolFromKube(p),
 		})
 	}
 
@@ -563,6 +680,9 @@ func constructService(
 		Waypoint:      w.GetAddress(),
 		LoadBalancing: lb,
 		IpFamilies:    ipFamily,
+		// A kubernetes service is always considered to be canonical, overrides for this host must be namespace-local
+		// to the client workload
+		Canonical: true,
 	}
 }
 
@@ -614,4 +734,21 @@ func precomputeService(w model.ServiceInfo) model.ServiceInfo {
 		Marshaled: w.MarshaledAddress,
 	}
 	return w
+}
+
+// setCanonical sets the canonical field in a WDS service without mangling the ServiceInfo
+func setCanonical(se *model.ServiceInfo) model.ServiceInfo {
+	wdsSvc := protomarshal.ShallowClone(se.Service)
+	wdsSvc.Canonical = true
+	return precomputeService(model.ServiceInfo{
+		Service:          wdsSvc,
+		LabelSelector:    se.LabelSelector,
+		PortNames:        se.PortNames,
+		Source:           se.Source,
+		Scope:            se.Scope,
+		Waypoint:         se.Waypoint,
+		MarshaledAddress: se.MarshaledAddress,
+		AsAddress:        se.AsAddress,
+		CreationTime:     se.CreationTime,
+	})
 }

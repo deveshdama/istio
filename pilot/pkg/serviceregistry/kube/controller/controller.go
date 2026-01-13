@@ -55,6 +55,7 @@ import (
 	"istio.io/istio/pkg/kube/multicluster"
 	istiolog "istio.io/istio/pkg/log"
 	"istio.io/istio/pkg/maps"
+	pm "istio.io/istio/pkg/model"
 	"istio.io/istio/pkg/monitoring"
 	"istio.io/istio/pkg/network"
 	"istio.io/istio/pkg/ptr"
@@ -206,9 +207,8 @@ type Controller struct {
 	imports serviceImportCache
 	pods    *PodCache
 
-	crdHandlers                []func(name string)
-	handlers                   model.ControllerHandlers
-	namespaceDiscoveryHandlers []func(ns string, event model.Event)
+	crdHandlers []func(name string)
+	handlers    model.ControllerHandlers
 
 	// This is only used for test
 	stop chan struct{}
@@ -233,7 +233,7 @@ type Controller struct {
 
 	// initialSyncTimedout is set to true after performing an initial processing timed out.
 	initialSyncTimedout *atomic.Bool
-	meshWatcher         mesh.Watcher
+	meshWatcher         mesh.RestrictedConfigWatcher
 
 	podsClient kclient.Client[*v1.Pod]
 
@@ -292,6 +292,7 @@ func NewController(kubeClient kubelib.Client, options Options) *Controller {
 	c.podsClient = kclient.NewFiltered[*v1.Pod](kubeClient, kclient.Filter{
 		ObjectFilter:    kubeClient.ObjectFilter(),
 		ObjectTransform: kubelib.StripPodUnusedFields,
+		FieldSelector:   "status.phase!=Failed",
 	})
 	c.pods = newPodCache(c, c.podsClient, func(key types.NamespacedName) {
 		c.queue.Push(func() error {
@@ -329,7 +330,7 @@ func NewController(kubeClient kubelib.Client, options Options) *Controller {
 	c.exports = newServiceExportCache(c)
 	c.imports = newServiceImportCache(c)
 
-	c.meshWatcher = options.MeshWatcher
+	c.meshWatcher = mesh.NewRestrictedConfigWatcher(options.MeshWatcher)
 	if c.opts.MeshNetworksWatcher != nil {
 		c.networksHandlerRegistration = c.opts.MeshNetworksWatcher.AddNetworksHandler(func() {
 			c.reloadMeshNetworks()
@@ -408,6 +409,9 @@ func (c *Controller) Cleanup() error {
 		c.opts.MeshNetworksWatcher.DeleteNetworksHandler(c.networksHandlerRegistration)
 	}
 
+	// Shutdown all the informer handlers
+	c.shutdownInformerHandlers()
+
 	return nil
 }
 
@@ -415,7 +419,7 @@ func (c *Controller) onServiceEvent(pre, curr *v1.Service, event model.Event) er
 	log.Debugf("Handle event %s for service %s in namespace %s", event, curr.Name, curr.Namespace)
 
 	// Create the standard (cluster.local) service.
-	svcConv := kube.ConvertService(*curr, c.opts.DomainSuffix, c.Cluster(), c.meshWatcher.Mesh())
+	svcConv := kube.ConvertService(*curr, c.opts.DomainSuffix, c.Cluster(), c.meshWatcher.TrustDomain())
 
 	switch event {
 	case model.EventDelete:
@@ -649,6 +653,14 @@ func (c *Controller) HasSynced() bool {
 	return c.queue.HasSynced()
 }
 
+func (c *Controller) shutdownInformerHandlers() {
+	c.namespaces.ShutdownHandlers()
+	c.services.ShutdownHandlers()
+	c.endpoints.slices.ShutdownHandlers()
+	c.pods.pods.ShutdownHandlers()
+	c.nodes.ShutdownHandlers()
+}
+
 func (c *Controller) informersSynced() bool {
 	return c.namespaces.HasSynced() &&
 		c.services.HasSynced() &&
@@ -725,8 +737,9 @@ func (c *Controller) GetService(hostname host.Name) *model.Service {
 // getPodLocality retrieves the locality for a pod.
 func (c *Controller) getPodLocality(pod *v1.Pod) string {
 	// if pod has `istio-locality` label, skip below ops
-	if len(pod.Labels[model.LocalityLabel]) > 0 {
-		return model.GetLocalityLabel(pod.Labels[model.LocalityLabel])
+	localityLabel := pm.GetLocalityLabel(pod.Labels)
+	if localityLabel != "" {
+		return pm.SanitizeLocalityLabel(localityLabel)
 	}
 
 	// NodeName is set by the scheduler after the pod is created
@@ -1157,11 +1170,6 @@ func (c *Controller) AppendServiceHandler(f model.ServiceHandler) {
 // AppendWorkloadHandler implements a service catalog operation
 func (c *Controller) AppendWorkloadHandler(f func(*model.WorkloadInstance, model.Event)) {
 	c.handlers.AppendWorkloadHandler(f)
-}
-
-// AppendNamespaceDiscoveryHandlers register handlers on namespace selected/deselected by discovery selectors change.
-func (c *Controller) AppendNamespaceDiscoveryHandlers(f func(string, model.Event)) {
-	c.namespaceDiscoveryHandlers = append(c.namespaceDiscoveryHandlers, f)
 }
 
 // AppendCrdHandlers register handlers on crd event.

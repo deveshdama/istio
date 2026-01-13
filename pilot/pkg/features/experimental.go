@@ -29,6 +29,10 @@ var (
 	FilterGatewayClusterConfig = env.Register("PILOT_FILTER_GATEWAY_CLUSTER_CONFIG", false,
 		"If enabled, Pilot will send only clusters that referenced in gateway virtual services attached to gateway").Get()
 
+	EnableAgentgateway = env.Register("PILOT_ENABLE_AGENTGATEWAY",
+		false,
+		"If enabled, the istio-agentgateway GatewayClass will be enabled.").Get()
+
 	// GlobalSendUnhealthyEndpoints contains the raw setting on GlobalSendUnhealthyEndpoints. This should be checked per-service
 	GlobalSendUnhealthyEndpoints = atomic.NewBool(env.Register(
 		"PILOT_SEND_UNHEALTHY_ENDPOINTS",
@@ -195,9 +199,33 @@ var (
 	CACertConfigMapName = env.Register("PILOT_CA_CERT_CONFIGMAP", "istio-ca-root-cert",
 		"The name of the ConfigMap that stores the Root CA Certificate that is used by istiod").Get()
 
+	CRLConfigMapName = env.Register("PILOT_CRL_CONFIGMAP", "istio-ca-crl",
+		"The name of the ConfigMap that stores the Certificate Revocation List (CRL) for a plugged-in CA").Get()
+
 	EnvoyStatusPortEnableProxyProtocol = env.Register("ENVOY_STATUS_PORT_ENABLE_PROXY_PROTOCOL", false,
 		"If enabled, Envoy will support requests with proxy protocol on its status port").Get()
 
 	EnableGatewayAPIInferenceExtension = env.Register("ENABLE_GATEWAY_API_INFERENCE_EXTENSION", false,
 		"If true, support gateway inference extension routing apis").Get()
+
+	EnableWildcardHostServiceEntriesForTLS = env.Register("ENABLE_WILDCARD_HOST_SERVICE_ENTRIES_FOR_TLS", false,
+		"If enabled, ServiceEntries with wildcard hosts and dynamic dns resolution will be allowed for TLS traffic. "+
+			"This is a security risk, susceptible to SNI spoofing, and should be used with caution. "+
+			"Only consider using this feature if the client is trusted and you understand the risks.").Get()
+
+	PilotIgnoreResourcesEnv = env.Register(
+		"PILOT_IGNORE_RESOURCES",
+		"",
+		"If set, the resources set on this list will be ignored and never reconciled."+
+			"This value should be a comma-separated list of resources names."+
+			"Items on this list can be prefixed with a '*.' meaning a whole group should be ignored.",
+	).Get()
+
+	PilotIncludeResourcesEnv = env.Register(
+		"PILOT_INCLUDE_RESOURCES",
+		"",
+		"If set, and combined with 'PILOT_IGNORE_RESOURCES' the resources set on this list will not be ignored."+
+			"This value should be a comma-separated list of resources names."+
+			"Items on this list can be prefixed with a '*.' meaning a whole group should be included regardless of the ignore list.",
+	).Get()
 )

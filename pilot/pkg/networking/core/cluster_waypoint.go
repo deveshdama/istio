@@ -168,6 +168,7 @@ func (cb *ClusterBuilder) buildWaypointInboundVIPCluster(
 		localCluster = cb.buildCluster(clusterName, discoveryType, lbEndpoints,
 			model.TrafficDirectionInboundVIP, &port, svc, nil, subset)
 	} else {
+		// DynamicDNS uses a custom cluster type and has the same cluster for HTTP and TLS protocols
 		localCluster = cb.buildDFPCluster(clusterName, svc, &port)
 	}
 
@@ -306,10 +307,18 @@ func (cb *ClusterBuilder) buildWaypointInboundVIP(proxy *model.Proxy, svcs map[h
 	clusters := []*cluster.Cluster{}
 	for _, svc := range svcs {
 		for _, port := range svc.Ports {
-			// We don't support UDP. And for dynamic DNS (dynamic forward proxy) we only support HTTP
-			// TODO(jaellio): add support for TCP/HTTPS with SNI DFP
-			if port.Protocol == protocol.UDP || (svc.Resolution == model.DynamicDNS && port.Protocol != protocol.HTTP) {
+			// We don't support UDP. And for dynamic DNS (dynamic forward proxy) we only support HTTP and TLS
+			if port.Protocol == protocol.UDP {
 				log.Debugf("skipping waypoint VIP cluster for unsupported protocol %s for service %s", port.Protocol, svc.Hostname)
+				continue
+			}
+			// For dynamic DNS (dynamic forward proxy) resolution protocol other than HTTP and TLS are not supported
+			if svc.Resolution == model.DynamicDNS && port.Protocol != protocol.HTTP && port.Protocol != protocol.TLS {
+				log.Debugf("skipping waypoint VIP cluster for unsupported protocol %s for service %s with DynamicDNS resolution", port.Protocol, svc.Hostname)
+				continue
+			}
+			if svc.Resolution == model.DynamicDNS && port.Protocol == protocol.TLS && !features.EnableWildcardHostServiceEntriesForTLS {
+				log.Warnf("skipping waypoint VIP cluster for TLS protocol for service %s with DynamicDNS resolution since the feature is disabled", svc.Hostname)
 				continue
 			}
 			if isEastWestGateway(proxy) {
@@ -369,7 +378,7 @@ func (cb *ClusterBuilder) buildWaypointInnerConnectOriginate(proxy *model.Proxy,
 			ClusterName: DoubleHBONEInnerConnectOriginate,
 			Endpoints:   util.BuildInternalEndpoint(DoubleHBONEOuterConnectOriginate, nil),
 		},
-		TypedExtensionProtocolOptions: h2connectUpgradeWithNoPooling(),
+		TypedExtensionProtocolOptions: cb.h2connectUpgradeWithNoPooling(),
 		TransportSocket:               transportSocket,
 	}
 
@@ -391,7 +400,7 @@ func (cb *ClusterBuilder) buildWaypointOuterConnectOriginate(proxy *model.Proxy,
 		ConnectTimeout:                protomarshal.Clone(cb.req.Push.Mesh.ConnectTimeout),
 		CleanupInterval:               durationpb.New(60 * time.Second),
 		CircuitBreakers:               &cluster.CircuitBreakers{Thresholds: []*cluster.CircuitBreakers_Thresholds{getDefaultCircuitBreakerThresholds()}},
-		TypedExtensionProtocolOptions: h2connectUpgradeWithNoPooling(),
+		TypedExtensionProtocolOptions: cb.h2connectUpgradeWithNoPooling(),
 		LbConfig: &cluster.Cluster_OriginalDstLbConfig_{
 			OriginalDstLbConfig: &cluster.Cluster_OriginalDstLbConfig{
 				UpstreamPortOverride: &wrappers.UInt32Value{
@@ -487,7 +496,7 @@ func (cb *ClusterBuilder) buildConnectOriginate(
 		ConnectTimeout:                protomarshal.Clone(cb.req.Push.Mesh.ConnectTimeout),
 		CleanupInterval:               durationpb.New(60 * time.Second),
 		CircuitBreakers:               &cluster.CircuitBreakers{Thresholds: []*cluster.CircuitBreakers_Thresholds{getDefaultCircuitBreakerThresholds()}},
-		TypedExtensionProtocolOptions: h2connectUpgrade(),
+		TypedExtensionProtocolOptions: cb.h2connectUpgrade(),
 		LbConfig: &cluster.Cluster_OriginalDstLbConfig_{
 			OriginalDstLbConfig: &cluster.Cluster_OriginalDstLbConfig{
 				UpstreamPortOverride: &wrappers.UInt32Value{
@@ -517,9 +526,20 @@ func (cb *ClusterBuilder) buildConnectOriginate(
 	return c
 }
 
-func h2connectUpgrade() map[string]*anypb.Any {
+func (cb *ClusterBuilder) getHBONEIdleTimeout() *durationpb.Duration {
+	// Use configured HBONE idle timeout from MeshConfig, or default to 1 hour if not set
+	if cb.req.Push.Mesh.HboneIdleTimeout != nil {
+		return cb.req.Push.Mesh.HboneIdleTimeout
+	}
+	return durationpb.New(3600 * time.Second)
+}
+
+func (cb *ClusterBuilder) h2connectUpgrade() map[string]*anypb.Any {
 	return map[string]*anypb.Any{
 		v3.HttpProtocolOptionsType: protoconv.MessageToAny(&http.HttpProtocolOptions{
+			CommonHttpProtocolOptions: &core.HttpProtocolOptions{
+				IdleTimeout: cb.getHBONEIdleTimeout(),
+			},
 			UpstreamProtocolOptions: &http.HttpProtocolOptions_ExplicitHttpConfig_{ExplicitHttpConfig: &http.HttpProtocolOptions_ExplicitHttpConfig{
 				ProtocolConfig: &http.HttpProtocolOptions_ExplicitHttpConfig_Http2ProtocolOptions{
 					Http2ProtocolOptions: &core.Http2ProtocolOptions{
@@ -531,7 +551,7 @@ func h2connectUpgrade() map[string]*anypb.Any {
 	}
 }
 
-func h2connectUpgradeWithNoPooling() map[string]*anypb.Any {
+func (cb *ClusterBuilder) h2connectUpgradeWithNoPooling() map[string]*anypb.Any {
 	return map[string]*anypb.Any{
 		v3.HttpProtocolOptionsType: protoconv.MessageToAny(&http.HttpProtocolOptions{
 			CommonHttpProtocolOptions: &core.HttpProtocolOptions{
@@ -545,6 +565,7 @@ func h2connectUpgradeWithNoPooling() map[string]*anypb.Any {
 				// TODO(https://github.com/istio/istio/issues/58039): remove it after deploying a sensible
 				// connection pooling fix for ambient multi-network.
 				MaxRequestsPerConnection: &wrappers.UInt32Value{Value: 1},
+				IdleTimeout:              cb.getHBONEIdleTimeout(),
 			},
 			UpstreamProtocolOptions: &http.HttpProtocolOptions_ExplicitHttpConfig_{ExplicitHttpConfig: &http.HttpProtocolOptions_ExplicitHttpConfig{
 				ProtocolConfig: &http.HttpProtocolOptions_ExplicitHttpConfig_Http2ProtocolOptions{

@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	"istio.io/api/annotation"
+	"istio.io/api/label"
 	networkingv1alpha3 "istio.io/api/networking/v1alpha3"
 	networkingclient "istio.io/client-go/pkg/apis/networking/v1"
 	securityclient "istio.io/client-go/pkg/apis/security/v1"
@@ -39,7 +40,9 @@ import (
 	"istio.io/istio/pilot/pkg/util/protoconv"
 	"istio.io/istio/pkg/cluster"
 	"istio.io/istio/pkg/config/constants"
+	cfgkube "istio.io/istio/pkg/config/kube"
 	"istio.io/istio/pkg/config/labels"
+	"istio.io/istio/pkg/config/protocol"
 	"istio.io/istio/pkg/config/schema/gvk"
 	"istio.io/istio/pkg/config/schema/kind"
 	kubeutil "istio.io/istio/pkg/kube"
@@ -58,7 +61,7 @@ import (
 // WorkloadsCollection builds out the core Workload object type used in ambient mode.
 // A Workload represents a single addressable unit of compute -- typically a Pod or a VM.
 // Workloads can come from a variety of sources; these are joined together to build one complete `Collection[WorkloadInfo]`.
-func (a *index) WorkloadsCollection(
+func (a Builder) WorkloadsCollection(
 	pods krt.Collection[*v1.Pod],
 	nodes krt.Collection[Node],
 	meshConfig krt.Singleton[MeshConfig],
@@ -101,7 +104,7 @@ func (a *index) WorkloadsCollection(
 	// also be generating `workloadapi.Service` definitions in the `ServicesCollection` logic.
 	ServiceEntryWorkloads := krt.NewManyCollection(
 		serviceEntries,
-		a.serviceEntryWorkloadBuilder(meshConfig, authorizationPolicies, peerAuths, waypoints, namespaces),
+		a.serviceEntryWorkloadBuilder(meshConfig, authorizationPolicies, peerAuths, waypoints, namespaces, workloadServices),
 		opts.WithName("ServiceEntryWorkloads")...,
 	)
 	// Workloads coming from endpointSlices. These are for *manually added* endpoints. Typically, Kubernetes will insert each pod
@@ -115,7 +118,9 @@ func (a *index) WorkloadsCollection(
 		opts.WithName("EndpointSliceWorkloads")...)
 
 	NetworkGatewayWorkloads := krt.NewManyFromNothing[model.WorkloadInfo](func(ctx krt.HandlerContext) []model.WorkloadInfo {
-		return slices.Map(a.LookupAllNetworkGateway(ctx), convertGateway)
+		meshCfg := krt.FetchOne(ctx, meshConfig.AsCollection())
+		all := LookupAllNetworkGateway(ctx, a.NetworkGateways)
+		return slices.Map(all, convertGateway(meshCfg))
 	}, opts.WithName("NetworkGatewayWorkloads")...)
 
 	Workloads := krt.JoinCollection(
@@ -149,7 +154,7 @@ func MergedGlobalWorkloadsCollection(
 	localWorkloadServices krt.Collection[model.ServiceInfo],
 	globalWorkloadServices krt.Collection[krt.Collection[krt.ObjectWithCluster[model.ServiceInfo]]],
 	globalWorkloadServicesByCluster krt.Index[cluster.ID, krt.Collection[krt.ObjectWithCluster[model.ServiceInfo]]],
-	globalNetworks networkCollections,
+	globalNetworks NetworkCollections,
 	localClusterID cluster.ID,
 	flags FeatureFlags,
 	domainSuffix string,
@@ -227,6 +232,7 @@ func MergedGlobalWorkloadsCollection(
 			localPeerAuths,
 			localWaypoints,
 			localCluster.Namespaces(),
+			localWorkloadServices,
 			localClusterGetter,
 			localNetworkGetter,
 			globalNetworks.NetworkGateways,
@@ -262,10 +268,11 @@ func MergedGlobalWorkloadsCollection(
 	)
 
 	GlobalNetworkGatewayWorkloads := krt.NewManyFromNothing[model.WorkloadInfo](func(ctx krt.HandlerContext) []model.WorkloadInfo {
+		meshCfg := krt.FetchOne(ctx, meshConfig.AsCollection())
 		return slices.Map(LookupAllNetworkGateway(
 			ctx,
 			globalNetworks.NetworkGateways,
-		), convertGateway)
+		), convertGateway(meshCfg))
 	}, opts.WithName("LocalNetworkGatewayWorkloads")...)
 	LocalNetworkGatewayWorkloadsWithCluster := krt.MapCollection(
 		GlobalNetworkGatewayWorkloads,
@@ -507,6 +514,7 @@ func MergedGlobalWorkloadsCollection(
 					localPeerAuths,
 					waypoints,
 					namespaces,
+					globalWorkloadServices,
 					func(ctx krt.HandlerContext) cluster.ID {
 						return c.ID
 					},
@@ -700,7 +708,7 @@ func workloadEntryWorkloadBuilder(
 		w.WorkloadType = workloadapi.WorkloadType_POD // XXX(shashankram): HACK to impersonate pod
 		w.CanonicalName, w.CanonicalRevision = kubelabels.CanonicalService(wle.Labels, w.WorkloadName)
 
-		setTunnelProtocol(wle.Labels, wle.Annotations, w)
+		setTunnelProtocol(wle.Labels, wle.Annotations, w, flags)
 		localNetwork := localNetworkGetter(ctx)
 		if network != localNetwork.String() {
 			// This is a remote workload that we'll never send directly; don't precompute
@@ -721,7 +729,7 @@ func workloadEntryWorkloadBuilder(
 	}
 }
 
-func (a *index) workloadEntryWorkloadBuilder(
+func (a Builder) workloadEntryWorkloadBuilder(
 	meshConfig krt.Singleton[MeshConfig],
 	authorizationPolicies krt.Collection[model.WorkloadAuthorization],
 	peerAuths krt.Collection[*securityclient.PeerAuthentication],
@@ -746,8 +754,8 @@ func (a *index) workloadEntryWorkloadBuilder(
 			return a.ClusterID
 		},
 		localNetworkGetter,
-		a.networks.NetworkGateways,
-		a.networks.GatewaysByNetwork,
+		a.NetworkGateways,
+		a.GatewaysByNetwork,
 		a.Flags,
 	)
 }
@@ -870,7 +878,7 @@ func podWorkloadBuilder(
 		w.WorkloadType = workloadapi.WorkloadType_POD // backwards compatibility
 		w.CanonicalName, w.CanonicalRevision = kubelabels.CanonicalService(p.Labels, w.WorkloadName)
 
-		setTunnelProtocol(p.Labels, p.Annotations, w)
+		setTunnelProtocol(p.Labels, p.Annotations, w, flags)
 		localNetwork := localNetworkGetter(ctx)
 		if network != localNetwork.String() {
 			// This is a remote workload that we'll never send directly; don't precompute
@@ -890,7 +898,7 @@ func podWorkloadBuilder(
 	}
 }
 
-func (a *index) podWorkloadBuilder(
+func (a Builder) podWorkloadBuilder(
 	meshConfig krt.Singleton[MeshConfig],
 	authorizationPolicies krt.Collection[model.WorkloadAuthorization],
 	peerAuths krt.Collection[*securityclient.PeerAuthentication],
@@ -922,8 +930,8 @@ func (a *index) podWorkloadBuilder(
 			return a.ClusterID
 		},
 		localNetworkGetter,
-		a.networks.NetworkGateways,
-		a.networks.GatewaysByNetwork,
+		a.NetworkGateways,
+		a.GatewaysByNetwork,
 		a.Flags,
 	)
 }
@@ -1033,12 +1041,19 @@ func serviceEntryWorkloadBuilder(
 	peerAuths krt.Collection[*securityclient.PeerAuthentication],
 	waypoints krt.Collection[Waypoint],
 	namespaces krt.Collection[*v1.Namespace],
+	workloadServices krt.Collection[model.ServiceInfo],
 	clusterGetter func(krt.HandlerContext) cluster.ID,
 	networkGetter func(krt.HandlerContext) network.ID,
 	networkGateways krt.Collection[NetworkGateway],
 	gatewaysByNetwork krt.Index[network.ID, NetworkGateway],
 	flags FeatureFlags,
 ) krt.TransformationMulti[*networkingclient.ServiceEntry, model.WorkloadInfo] {
+	serviceEntryInfosByNamespaceAndName := krt.NewIndex(workloadServices, "serviceEntryInfosByNamespaceAndName", func(si model.ServiceInfo) []string {
+		if si.Source.Kind != kind.ServiceEntry {
+			return nil
+		}
+		return []string{si.Source.NamespacedName.Namespace + "/" + si.Source.NamespacedName.Name}
+	})
 	return func(ctx krt.HandlerContext, se *networkingclient.ServiceEntry) []model.WorkloadInfo {
 		eps := se.Spec.Endpoints
 		// If we have a DNS service, endpoints are not required
@@ -1053,7 +1068,13 @@ func serviceEntryWorkloadBuilder(
 		cluster := clusterGetter(ctx)
 		// here we don't care about the *service* waypoint (hence it is nil); we are only going to use a subset of the info in
 		// `allServices` (since we are building workloads here, not services).
-		allServices := serviceEntriesInfo(ctx, se, nil, nil, networkGetter)
+		allServices := krt.Fetch(ctx, workloadServices, krt.FilterIndex(serviceEntryInfosByNamespaceAndName, se.Namespace+"/"+se.Name))
+		if len(allServices) == 0 {
+			// This ServiceEntry was pruned entirely by deduplication in the WorkloadServices collection, it's endpoints should not be sent to the data plane.
+			// TODO: Once we write deduplication results to ServiceEntry status, we should consider lowering this to Debug to reduce noise in the logs. For now, we warn.
+			log.Warnf("ServiceEntry %s/%s was pruned by deduplication. Endpoints from this ServiceEntry will not be sent to the data plane.", se.Namespace, se.Name)
+			return nil
+		}
 		if implicitEndpoints {
 			eps = slices.Map(allServices, func(si model.ServiceInfo) *networkingv1alpha3.WorkloadEntry {
 				return &networkingv1alpha3.WorkloadEntry{Address: si.Service.Hostname}
@@ -1124,7 +1145,7 @@ func serviceEntryWorkloadBuilder(
 			w.WorkloadName, w.WorkloadType = se.Name, workloadapi.WorkloadType_POD // XXX(shashankram): HACK to impersonate pod
 			w.CanonicalName, w.CanonicalRevision = kubelabels.CanonicalService(se.Labels, w.WorkloadName)
 
-			setTunnelProtocol(se.Labels, se.Annotations, w)
+			setTunnelProtocol(se.Labels, se.Annotations, w, flags)
 			res = append(res, precomputeWorkload(model.WorkloadInfo{
 				Workload:     w,
 				Labels:       se.Labels,
@@ -1136,12 +1157,13 @@ func serviceEntryWorkloadBuilder(
 	}
 }
 
-func (a *index) serviceEntryWorkloadBuilder(
+func (a Builder) serviceEntryWorkloadBuilder(
 	meshConfig krt.Singleton[MeshConfig],
 	authorizationPolicies krt.Collection[model.WorkloadAuthorization],
 	peerAuths krt.Collection[*securityclient.PeerAuthentication],
 	waypoints krt.Collection[Waypoint],
 	namespaces krt.Collection[*v1.Namespace],
+	workloadServices krt.Collection[model.ServiceInfo],
 ) krt.TransformationMulti[*networkingclient.ServiceEntry, model.WorkloadInfo] {
 	return serviceEntryWorkloadBuilder(
 		meshConfig,
@@ -1149,14 +1171,15 @@ func (a *index) serviceEntryWorkloadBuilder(
 		peerAuths,
 		waypoints,
 		namespaces,
+		workloadServices,
 		func(ctx krt.HandlerContext) cluster.ID {
 			return a.ClusterID
 		},
 		func(ctx krt.HandlerContext) network.ID {
 			return a.Network(ctx)
 		},
-		a.networks.NetworkGateways,
-		a.networks.GatewaysByNetwork,
+		a.NetworkGateways,
+		a.GatewaysByNetwork,
 		a.Flags,
 	)
 }
@@ -1300,7 +1323,7 @@ func endpointSlicesBuilder(
 	}
 }
 
-func (a *index) endpointSlicesBuilder(
+func (a Builder) endpointSlicesBuilder(
 	meshConfig krt.Singleton[MeshConfig],
 	workloadServices krt.Collection[model.ServiceInfo],
 ) krt.TransformationMulti[*discovery.EndpointSlice, model.WorkloadInfo] {
@@ -1317,7 +1340,10 @@ func (a *index) endpointSlicesBuilder(
 	)
 }
 
-func setTunnelProtocol(labels, annotations map[string]string, w *workloadapi.Workload) {
+func setTunnelProtocol(labels, annotations map[string]string, w *workloadapi.Workload, flags FeatureFlags) {
+	if flags.EnableMtlsTransportProtocol && labels[label.SecurityTlsMode.Name] == model.IstioMutualTLSModeLabel {
+		w.TunnelProtocol = workloadapi.TunnelProtocol_LEGACY_ISTIO_MTLS
+	}
 	if annotations[annotation.AmbientRedirection.Name] == constants.AmbientRedirectionEnabled {
 		// Configured for override
 		w.TunnelProtocol = workloadapi.TunnelProtocol_HBONE
@@ -1327,6 +1353,8 @@ func setTunnelProtocol(labels, annotations map[string]string, w *workloadapi.Wor
 		w.TunnelProtocol = workloadapi.TunnelProtocol_HBONE
 		w.NativeTunnel = true
 	}
+	// TODO: add TunnelProtocol_LEGACY_ISTIO_MTLS. This requires Ztunnel to support it for 1 version, though, since a new
+	// enum field would be rejected.
 }
 
 func pickTrustDomain(mesh *MeshConfig) string {
@@ -1527,22 +1555,25 @@ func gatewayUID(gw model.NetworkGateway) string {
 // convertGateway always converts a NetworkGateway into a Workload.
 // Workloads have a NetworkGateway field, which is effectively a pointer to another object (Service or Workload); in order
 // to facilitate this we need to translate our Gateway model down into a WorkloadInfo ztunnel can understand.
-func convertGateway(gw NetworkGateway) model.WorkloadInfo {
-	wl := &workloadapi.Workload{
-		Uid:            gatewayUID(gw.NetworkGateway),
-		Name:           gatewayUID(gw.NetworkGateway),
-		ServiceAccount: gw.ServiceAccount.Name,
-		Namespace:      gw.ServiceAccount.Namespace,
-		Network:        gw.Network.String(),
-	}
+func convertGateway(mesh *MeshConfig) func(gw NetworkGateway) model.WorkloadInfo {
+	return func(gw NetworkGateway) model.WorkloadInfo {
+		wl := &workloadapi.Workload{
+			Uid:            gatewayUID(gw.NetworkGateway),
+			Name:           gatewayUID(gw.NetworkGateway),
+			ServiceAccount: gw.ServiceAccount.Name,
+			Namespace:      gw.ServiceAccount.Namespace,
+			Network:        gw.Network.String(),
+			TrustDomain:    pickTrustDomain(mesh),
+		}
 
-	if ip, err := netip.ParseAddr(gw.Addr); err == nil {
-		wl.Addresses = append(wl.Addresses, ip.AsSlice())
-	} else {
-		wl.Hostname = gw.Addr
-	}
+		if ip, err := netip.ParseAddr(gw.Addr); err == nil {
+			wl.Addresses = append(wl.Addresses, ip.AsSlice())
+		} else {
+			wl.Hostname = gw.Addr
+		}
 
-	return precomputeWorkload(model.WorkloadInfo{Workload: wl})
+		return precomputeWorkload(model.WorkloadInfo{Workload: wl})
+	}
 }
 
 func getNetworkGatewayAddress(
@@ -1641,4 +1672,20 @@ func precomputeWorkload(w model.WorkloadInfo) model.WorkloadInfo {
 		Marshaled: w.MarshaledAddress,
 	}
 	return w
+}
+
+func toAppProtocolFromKube(p v1.ServicePort) workloadapi.AppProtocol {
+	return toAppProtocolFromProtocol(cfgkube.ConvertProtocol(p.Port, p.Name, p.Protocol, p.AppProtocol))
+}
+
+func toAppProtocolFromProtocol(p protocol.Instance) workloadapi.AppProtocol {
+	switch p {
+	case protocol.HTTP:
+		return workloadapi.AppProtocol_HTTP11
+	case protocol.HTTP2:
+		return workloadapi.AppProtocol_HTTP2
+	case protocol.GRPC:
+		return workloadapi.AppProtocol_GRPC
+	}
+	return workloadapi.AppProtocol_UNKNOWN
 }

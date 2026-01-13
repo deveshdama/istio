@@ -199,13 +199,14 @@ func (cfg *NftablesConfigurator) AppendInpodRules(podOverrides config.PodLevelOv
 		}
 	}
 
+	// CLI: nft add rule inet istio-ambient-mangle istio-prerouting meta mark & 0xfff == 0x539 counter ct mark set ct mark & 0xfffff000 | 0x111
+	// DESC: If we have a packet mark, set a connmark.
+	cfg.ruleBuilder.AppendRule(IstioPreroutingChain, AmbientMangleTable,
+		"meta mark & 0xfff ==",
+		fmt.Sprintf("0x%x", config.InpodMark), Counter, "ct mark set ct mark & 0xfffff000 | ",
+		fmt.Sprintf("0x%x", config.InpodTProxyMark))
+
 	if !podOverrides.IngressMode {
-		// CLI: nft add rule inet istio-ambient-mangle istio-prerouting meta mark & 0xfff == 0x539 counter ct mark set ct mark & 0xfffff000 | 0x111
-		// DESC: If we have a packet mark, set a connmark.
-		cfg.ruleBuilder.AppendRule(IstioPreroutingChain, AmbientMangleTable,
-			"meta mark & 0xfff ==",
-			fmt.Sprintf("0x%x", config.InpodMark), Counter, "ct mark set ct mark & 0xfffff000 | ",
-			fmt.Sprintf("0x%x", config.InpodTProxyMark))
 
 		// Handle healthcheck probes from the host node. In the host netns, before the packet enters the pod, we SNAT
 		// the healthcheck packet to a fixed IP if the packet is coming from a node-local process with a socket.
@@ -224,7 +225,7 @@ func (cfg *NftablesConfigurator) AppendInpodRules(podOverrides config.PodLevelOv
 
 		// CLI: nft add rule inet istio-ambient-nat istio-prerouting meta l4proto tcp ip6 saddr
 		// fd16:9254:7127:1337:ffff:ffff:ffff:ffff counter accept
-		cfg.ruleBuilder.AppendRule(IstioPreroutingChain, AmbientNatTable,
+		cfg.ruleBuilder.AppendV6RuleIfSupported(IstioPreroutingChain, AmbientNatTable,
 			"meta l4proto tcp",
 			"ip6 saddr", cfg.cfg.HostProbeV6SNATAddress.String(), Counter,
 			"accept",
@@ -240,7 +241,7 @@ func (cfg *NftablesConfigurator) AppendInpodRules(podOverrides config.PodLevelOv
 	)
 
 	// CLI: nft add rule inet istio-ambient-nat istio-output meta l4proto tcp ip6 daddr fd16:9254:7127:1337:ffff:ffff:ffff:ffff counter accept
-	cfg.ruleBuilder.AppendRule(IstioOutputChain, AmbientNatTable,
+	cfg.ruleBuilder.AppendV6RuleIfSupported(IstioOutputChain, AmbientNatTable,
 		"meta l4proto tcp",
 		"ip6 daddr", cfg.cfg.HostProbeV6SNATAddress.String(), Counter,
 		"accept",
@@ -259,7 +260,7 @@ func (cfg *NftablesConfigurator) AppendInpodRules(podOverrides config.PodLevelOv
 			"redirect to", ":"+fmt.Sprint(config.ZtunnelInboundPlaintextPort),
 		)
 
-		cfg.ruleBuilder.AppendRule(IstioPreroutingChain, AmbientNatTable,
+		cfg.ruleBuilder.AppendV6RuleIfSupported(IstioPreroutingChain, AmbientNatTable,
 			"ip6 daddr", "!=", "::1/128",
 			"tcp dport", "!=", fmt.Sprint(config.ZtunnelInboundPort),
 			"mark and 0xfff", "!=", fmt.Sprintf("0x%x", config.InpodMark), Counter,
@@ -301,7 +302,7 @@ func (cfg *NftablesConfigurator) AppendInpodRules(podOverrides config.PodLevelOv
 		)
 
 		// CLI: nft add rule inet istio-ambient-nat istio-output ip6 daddr != ::1/128 tcp dport 53 mark and 0xfff != 0x539 counter redirect to :15053
-		cfg.ruleBuilder.AppendRule(
+		cfg.ruleBuilder.AppendV6RuleIfSupported(
 			IstioOutputChain, AmbientNatTable,
 			"ip6 daddr", "!=", "::1/128",
 			"tcp dport", "53",
@@ -356,7 +357,7 @@ func (cfg *NftablesConfigurator) AppendInpodRules(podOverrides config.PodLevelOv
 	)
 
 	// CLI: nft add rule inet istio-ambient-nat istio-output oifname "lo" ip6 daddr != ::1/128 counter accept
-	cfg.ruleBuilder.AppendRule(
+	cfg.ruleBuilder.AppendV6RuleIfSupported(
 		IstioOutputChain, AmbientNatTable,
 		"oifname", "lo",
 		"ip6 daddr",
@@ -377,7 +378,7 @@ func (cfg *NftablesConfigurator) AppendInpodRules(podOverrides config.PodLevelOv
 		"redirect to", ":"+fmt.Sprintf("%d", config.ZtunnelOutboundPort),
 	)
 
-	cfg.ruleBuilder.AppendRule(
+	cfg.ruleBuilder.AppendV6RuleIfSupported(
 		IstioOutputChain, AmbientNatTable,
 		"meta l4proto tcp",
 		"ip6 daddr",
@@ -443,7 +444,7 @@ func (cfg *NftablesConfigurator) CreateHostRulesForHealthChecks() error {
 	//
 	// Challenge: In nftables, there is no direct equivalent to "--socket-exists", so we explored multiple alternatives
 	// - Option-1 (UID-based matching): Since kubelet runs as a specific process with a known UID, we can use
-	//   meta skuid to identify traffic originating from kubelet.
+	//   meta skuid to identify traffic originating from kubelet (or kubelite in MicroK8s).
 	//
 	// - Option-2: Match on kubelet’s source IP (node IP). This works in theory but is a bit unsafe as
 	//   other host processes can also send traffic from the node IP, and nodes can have multiple IPs making the
@@ -473,7 +474,7 @@ func (cfg *NftablesConfigurator) CreateHostRulesForHealthChecks() error {
 		"ip", "daddr", fmt.Sprintf("@%s-v4", config.ProbeIPSet), Counter, "snat", "to", cfg.cfg.HostProbeSNATAddress.String())
 
 	// For V6 we have to use a different set and a different SNAT IP
-	cfg.ruleBuilder.AppendRule(PostroutingChain, AmbientNatTable, "meta l4proto tcp", "skuid", kubeletUID,
+	cfg.ruleBuilder.AppendV6RuleIfSupported(PostroutingChain, AmbientNatTable, "meta l4proto tcp", "skuid", kubeletUID,
 		"ip6", "daddr", fmt.Sprintf("@%s-v6", config.ProbeIPSet), Counter, "snat", "to", cfg.cfg.HostProbeV6SNATAddress.String())
 
 	return util.RunAsHost(func() error {
